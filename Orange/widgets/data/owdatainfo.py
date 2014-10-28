@@ -1,3 +1,5 @@
+import threading
+
 from PyQt4 import QtGui, QtCore
 from Orange.widgets import widget, gui
 from Orange.data.table import Table
@@ -27,16 +29,22 @@ class OWDataInfo(widget.OWWidget):
         super().__init__()
 
         self.data(None)
+        self.data_set_size = self.features = self.meta_attributes = ""
+        self.location = ""
         for box in ("Data Set Size", "Features", "Targets", "Meta Attributes",
                     "Location"):
             name = box.lower().replace(" ", "_")
             bo = gui.widgetBox(self.controlArea, box,
                                addSpace=False and box != "Meta Attributes")
             gui.label(bo, self, "%%(%s)s" % name)
-
-    def resize(self):
+        self.targets = "Discrete class with 123 values"
         QtGui.qApp.processEvents()
-        QtCore.QTimer.singleShot(0, self.adjustSize)
+        QtCore.QTimer.singleShot(0, self.fix_size)
+
+    def fix_size(self):
+        self.adjustSize()
+        self.targets = "None"
+        self.setFixedSize(self.size())
 
     def data(self, data):
         def n_or_none(i):
@@ -58,7 +66,6 @@ class OWDataInfo(widget.OWWidget):
             self.data_set_size = "No data"
             self.features = self.targets = self.meta_attributes = "None"
             self.location = ""
-            self.resize()
             return
 
         sparses = [s for s, m in (("features", data.X_density),
@@ -69,8 +76,16 @@ class OWDataInfo(widget.OWWidget):
         else:
             sparses = ""
         domain = data.domain
-        self.data_set_size = pack_table((("Rows", len(data)),
-                                         ("Variables", len(domain)))) + sparses
+        self.data_set_size = pack_table((
+            ("Rows", '~{}'.format(data.approx_len())),
+            ("Variables", len(domain)))) + sparses
+
+        def update_size():
+            self.data_set_size = pack_table((
+                ("Rows", len(data)),
+                ("Variables", len(domain)))) + sparses
+
+        threading.Thread(target=update_size).start()
 
         if not domain.attributes:
             self.features = "None"
@@ -112,7 +127,6 @@ class OWDataInfo(widget.OWWidget):
         else:
             self.location = "Data is stored in memory"
 
-        self.resize()
 
 if __name__ == "__main__":
     a = QtGui.QApplication([])
