@@ -231,6 +231,8 @@ class SqlTable(table.Table):
     def _get_distinct_values(self, field_name):
         sql = " ".join(["SELECT DISTINCT", self.quote_identifier(field_name),
                         "FROM", self.table_name,
+                        "WHERE {} IS NOT NULL".format(
+                            self.quote_identifier(field_name)),
                         "ORDER BY", self.quote_identifier(field_name),
                         "LIMIT 21"])
         with self._execute_sql_query(sql) as cur:
@@ -384,6 +386,31 @@ class SqlTable(table.Table):
         if get_exact:
             threading.Thread(target=len, args=(self,)).start()
         return alen
+
+    _X = None
+    _Y = None
+
+    def download_data(self, limit=None):
+        """Download SQL data and store it in memory as numpy matrices."""
+        if limit and len(self) > limit: #TODO: faster check for size limit
+            raise ValueError("Too many rows to download the data into memory.")
+        self._X = np.vstack(row._x for row in self)
+        self._Y = np.vstack(row._y for row in self)
+        self._cached__len__ = self._X.shape[0]
+
+    @property
+    def X(self):
+        """Numpy array with attribute values."""
+        if self._X is None:
+            self.download_data(1000)
+        return self._X
+
+    @property
+    def Y(self):
+        """Numpy array with class values."""
+        if self._Y is None:
+            self.download_data(1000)
+        return self._Y
 
     def has_weights(self):
         return False

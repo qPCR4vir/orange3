@@ -1,13 +1,16 @@
 import sys
+import threading
 import traceback
 from math import isnan
 from functools import reduce
+
 from PyQt4 import QtCore
 from PyQt4 import QtGui
 
+from Orange.data import ContinuousVariable
 from Orange.data.storage import Storage
 from Orange.data.table import Table
-from Orange.data import ContinuousVariable
+from Orange.data.sql.table import SqlTable
 from Orange.statistics import basic_stats
 
 from Orange.widgets import widget, gui
@@ -281,7 +284,7 @@ class OWDataTable(widget.OWWidget):
     outputs = [("Selected Data", Table, Default),
                ("Other Data", Table)]
 
-    show_distributions = Setting(True)
+    show_distributions = Setting(False)
     dist_color_RGB = Setting((220, 220, 220, 255))
     show_attribute_labels = Setting(True)
     auto_commit = Setting(False)
@@ -417,7 +420,7 @@ class OWDataTable(widget.OWWidget):
             self.setInfo(self.data.get(self.table2id.get(
                 self.tabs.currentWidget(), None), None))
 
-        if not len(self.data):
+        if not self.data:
             self.send_button.setEnabled(False)
 
     #TODO Implement
@@ -618,11 +621,8 @@ class OWDataTable(widget.OWWidget):
         return descriptions
 
     def setInfo(self, data):
-        """
-        Updates data info.
-        """
-        def sp(l):
-            n = len(l)
+        """Updates data info."""
+        def sp(n):
             if n == 0:
                 return "No", "s"
             elif n == 1:
@@ -636,29 +636,40 @@ class OWDataTable(widget.OWWidget):
             self.info_meta.setText('')
             self.info_class.setText('')
         else:
-            descriptions = datacaching.getCached(
-                data, self.__compute_density, (data, ))
-            out_i = "%s instance%s" % sp(data)
+            if isinstance(data, SqlTable):
+                descriptions = ['', '', '']
+            else:
+                descriptions = datacaching.getCached(
+                    data, self.__compute_density, (data, ))
+            out_i = "~%s instance%s" % sp(data.approx_len())
             if descriptions is self.__no_missing:
                 out_i += " (no missing values)"
             self.info_ex.setText(out_i)
 
+            def update_num_inst():
+                out_i = "%s instance%s" % sp(len(data))
+                if descriptions is self.__no_missing:
+                    out_i += " (no missing values)"
+                self.info_ex.setText(out_i)
+
+            threading.Thread(target=update_num_inst).start()
+
             self.info_attr.setText("%s feature%s" %
-                                   sp(data.domain.attributes) + descriptions[0])
+                    sp(len(data.domain.attributes)) + descriptions[0])
 
             self.info_meta.setText("%s meta attribute%s" %
-                                   sp(data.domain.metas) + descriptions[2])
+                                   sp(len(data.domain.metas)) + descriptions[2])
 
             if not data.domain.class_vars:
                 out_c = 'No target variable.'
             else:
                 if len(data.domain.class_vars) > 1:
-                    out_c = "%s outcome%s" % sp(data.domain.class_vars)
+                    out_c = "%s outcome%s" % sp(len(data.domain.class_vars))
                 elif isinstance(data.domain.class_var, ContinuousVariable):
                     out_c = 'Continuous target variable'
                 else:
                     out_c = 'Discrete class with %s value%s' % sp(
-                        data.domain.class_var.values)
+                        len(data.domain.class_var.values))
                 out_c += descriptions[1]
             self.info_class.setText(out_c)
 
