@@ -1,3 +1,5 @@
+from collections import defaultdict
+from itertools import product
 from math import sqrt, floor, ceil
 import random
 import sys
@@ -6,10 +8,10 @@ from PyQt4.QtCore import Qt
 from PyQt4.QtGui import (QGraphicsScene, QGraphicsView, QColor, QPen, QBrush,
                          QDialog, QApplication)
 
+
 import Orange
-from Orange.data import Table, ContinuousVariable
-from Orange.data.discretization import DiscretizeTable
-from Orange.feature.discretization import EqualFreq
+from Orange.data import Table, ContinuousVariable, DiscreteVariable
+from Orange.data.sql.table import SqlTable
 from Orange.statistics.contingency import get_contingency
 from Orange.widgets import gui
 from Orange.widgets.utils import getHtmlCompatibleString
@@ -109,10 +111,8 @@ class OWSieveDiagram(OWWidget):
 
         if data:
             if any(isinstance(attr, ContinuousVariable) for attr in data.domain):
-                self.data = DiscretizeTable(data, method=EqualFreq())
-                self.information(0, "Continuous attributes were discretized.")
-#            if not self.data or len(data.domain) != len(self.data.domain):
-#                self.information(1, "Unused attribute values were removed.")
+                self.information(0, "Data contains continuous variables. " +
+                                 "Discretize the data to use them.")
 
         if not sameDomain:
             self.initCombos()
@@ -145,10 +145,9 @@ class OWSieveDiagram(OWWidget):
         else:
             # data = orange.Preprocessor_dropMissing(self.data.select([xAttr, yAttr, self.attrCondition]))
             # data = self.data.select({self.attrCondition:self.attrConditionValue})
-            filt = Orange.data.filter.Values()
-            filt.domain = self.data.domain
             fd = Orange.data.filter.FilterDiscrete(column=self.attrCondition, values=[self.attrConditionValue])
-            filt.conditions.append(fd)
+            filt = Orange.data.filter.Values([fd])
+            filt.domain = self.data.domain
             data = filt(self.data)
 
         # if dropMissingData: return orange.Preprocessor_dropMissing(data)
@@ -174,10 +173,11 @@ class OWSieveDiagram(OWWidget):
         self.attrConditionValueCombo.clear()
 
         if not self.data: return
-        for i in range(len(self.data.domain)):
-            self.attrXCombo.addItem(self.icons[self.data.domain[i]], self.data.domain[i].name)
-            self.attrYCombo.addItem(self.icons[self.data.domain[i]], self.data.domain[i].name)
-            self.attrConditionCombo.addItem(self.icons[self.data.domain[i]], self.data.domain[i].name)
+        for i, var in enumerate(self.data.domain):
+            if isinstance(var, DiscreteVariable):
+                self.attrXCombo.addItem(self.icons[self.data.domain[i]], self.data.domain[i].name)
+                self.attrYCombo.addItem(self.icons[self.data.domain[i]], self.data.domain[i].name)
+                self.attrConditionCombo.addItem(self.icons[self.data.domain[i]], self.data.domain[i].name)
         self.attrCondition = str(self.attrConditionCombo.itemText(0))
 
         if self.attrXCombo.count() > 0:
@@ -314,36 +314,36 @@ class OWSieveDiagram(OWWidget):
 
     # create a dictionary with all possible pairs of "combination-of-attr-values" : count
     def getConditionalDistributions(self, data, attrs):
-        def counter(s):
-            t = [0 for i in range(0, len(s))]
-            while True:
-                yield t
-                for i in range(len(s)):
-                    t[i] = (t[i] + 1) % s[i]
-                    if t[i]:
-                        break
-                else:
-                    break
+        cond_dist = defaultdict(int)
+        all_attrs = [data.domain[a] for a in attrs]
+        if data.domain.class_var is not None:
+            all_attrs.append(data.domain.class_var)
 
-        dict = {}
-        for i in range(0, len(attrs)):
-            attr = attrs
-            # for j in range(0, i+1):
-            #     attr.append([a for a in data.domain.attributes if a.name == attrs[j].name][0])
-
-            s = [len(a.values) for a in attr]
-            for indices in counter(s):
-                vals = []
-                filt = Orange.data.filter.Values()
-                filt.domain = data.domain
-                for k in range(len(indices)):
-                    vals.append(attr[k].values[indices[k]])
-                    fd = Orange.data.filter.FilterDiscrete(column=attr[k], values=[attr[k].values[indices[k]]])
-                    filt.conditions.append(fd)
-                filtdata = filt(data)
-                dict['-'.join(vals)] = len(filtdata)
-
-        return dict
+        for i in range(1, len(all_attrs) + 1):
+            attr = all_attrs[:i]
+            if type(data) == SqlTable:
+                # make all possible pairs of attributes + class_var
+                attr = [a.to_sql() for a in attr]
+                fields = attr + ["COUNT(*)"]
+                query = data._sql_query(fields, group_by=attr)
+                with data._execute_sql_query(query) as cur:
+                    res = cur.fetchall()
+                for r in res:
+                    str_values =[a.repr_val(a.to_val(x)) for a, x in zip(all_attrs, r[:-1])]
+                    str_values = [x if x != '?' else 'None' for x in str_values]
+                    cond_dist['-'.join(str_values)] = r[-1]
+            else:
+                for indices in product(*(range(len(a.values)) for a in attr)):
+                    vals = []
+                    conditions = []
+                    for k, ind in enumerate(indices):
+                        vals.append(attr[k].values[ind])
+                        fd = filter.FilterDiscrete(column=attr[k], values=[attr[k].values[ind]])
+                        conditions.append(fd)
+                    filt = filter.Values(conditions)
+                    filtdata = filt(data)
+                    cond_dist['-'.join(vals)] = len(filtdata)
+        return cond_dist
 
     ######################################################################
     ## show deviations from attribute independence with standardized pearson residuals
