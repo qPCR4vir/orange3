@@ -22,7 +22,7 @@ class Fitter:
         if type(self).fit is Fitter.fit:
             clf = self.fit_storage(data)
         else:
-            X, Y, W = data.X, data.Y, data.W if data.has_weights else None
+            X, Y, W = data.X, data.Y, data.W if data.has_weights() else None
             clf = self.fit(X, Y, W)
         clf.domain = data.domain
         clf.supports_multiclass = self.supports_multiclass
@@ -127,6 +127,18 @@ class Model:
 
 
 class SklFitter(Fitter):
+
+    _params = None
+
+    @property
+    def params(self):
+        return self._params
+
+    @params.setter
+    def params(self, value):
+        self._params = value
+        self._params.pop("self", None)
+
     def __call__(self, data):
         clf = super().__call__(data)
         clf.used_vals = [np.unique(y) for y in data.Y.T]
