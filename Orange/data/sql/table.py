@@ -20,7 +20,8 @@ from Orange.data.sql import filter as sql_filter
 from Orange.data.sql.filter import CustomFilterSql
 from Orange.data.sql.parser import SqlParser
 
-
+LARGE_TABLE = 100000
+DEFAULT_SAMPLE_TIME = 1
 
 class SqlTable(table.Table):
     connection_pool = None
@@ -78,15 +79,13 @@ class SqlTable(table.Table):
 
         if self.connection_pool is None:
             self.connection_pool = psycopg2.pool.ThreadedConnectionPool(
-                1, 6, **connection_args)
+                1, 16, **connection_args)
         self.host = host
         self.database = database
 
         if table is not None:
             self.table_name = self.quote_identifier(table)
-            self.domain = self.domain_from_fields(
-                self._get_fields(table, guess_values=guess_values),
-                type_hints=type_hints)
+            self.domain = self.get_domain(type_hints, guess_values)
             self.name = table
 
     @classmethod
@@ -153,6 +152,10 @@ class SqlTable(table.Table):
         if table:
             params['table'] = table
         return params
+
+    def get_domain(self, type_hints=None, guess_values=False):
+        fields = self._get_fields(self.table_name, guess_values=guess_values)
+        return self.domain_from_fields(fields, type_hints)
 
     def domain_from_fields(self, fields, type_hints=None):
         """:fields: tuple(field_name, field_type, field_expression, values)"""
@@ -417,6 +420,9 @@ class SqlTable(table.Table):
 
     def _compute_basic_stats(self, columns=None,
                              include_metas=False, compute_var=False):
+        if self.approx_len() > LARGE_TABLE:
+            self = self.sample_time(DEFAULT_SAMPLE_TIME)
+
         if columns is not None:
             columns = [self.domain.var_from_domain(col) for col in columns]
         else:
@@ -447,6 +453,9 @@ class SqlTable(table.Table):
         return stats
 
     def _compute_distributions(self, columns=None):
+        if self.approx_len() > LARGE_TABLE:
+            self = self.sample_time(DEFAULT_SAMPLE_TIME)
+
         if columns is not None:
             columns = [self.domain.var_from_domain(col) for col in columns]
         else:
@@ -471,6 +480,9 @@ class SqlTable(table.Table):
         return dists
 
     def _compute_contingency(self, col_vars=None, row_var=None):
+        if self.approx_len() > LARGE_TABLE:
+            self = self.sample_time(DEFAULT_SAMPLE_TIME)
+
         if col_vars is None:
             col_vars = range(len(self.domain.variables))
         if len(col_vars) != 1:
@@ -664,6 +676,47 @@ class SqlTable(table.Table):
     def quote_string(self, value):
         return "'%s'" % value
 
+    def sample_percentage(self, percentage, no_cache=False):
+        return self._sample('blocksample_percent', percentage,
+                            no_cache=no_cache)
+
+    def sample_time(self, time_in_seconds, no_cache=False):
+        return self._sample('blocksample_time', int(time_in_seconds * 1000),
+                            no_cache=no_cache)
+
+    def _sample(self, method, parameter, no_cache=False):
+        if "," in self.table_name:
+            raise NotImplementedError("Sampling of complex queries is not supported")
+
+        sample_table = '__%s_%s_%s' % (
+            self.unquote_identifier(self.table_name),
+            method,
+            str(parameter).replace('.', '_'))
+        create = False
+        try:
+            with self._execute_sql_query("SELECT * FROM %s LIMIT 0" % self.quote_identifier(sample_table)) as cur:
+                cur.fetchall()
+
+            if no_cache:
+                with self._execute_sql_query("DROP TABLE %s" % self.quote_identifier(sample_table)) as cur:
+                    cur.fetchall()
+                create = True
+
+        except psycopg2.ProgrammingError:
+            create = True
+
+        if create:
+            with self._execute_sql_query('SELECT %s(%s, %s, %s)' % (
+                    method,
+                    self.quote_string(sample_table),
+                    self.quote_string(self.unquote_identifier(self.table_name)),
+                    parameter)) as cur:
+                cur.fetchall()
+
+        sampled_table = self.copy()
+        sampled_table.table_name = self.quote_identifier(sample_table)
+        return sampled_table
+
     @contextmanager
     def _execute_sql_query(self, query, param=None):
         connection = self.connection_pool.getconn()
@@ -674,6 +727,9 @@ class SqlTable(table.Table):
         finally:
             connection.commit()
             self.connection_pool.putconn(connection)
+
+    def checksum(self, include_metas=True):
+        return np.nan
 
 
 class SqlRowInstance(instance.Instance):
