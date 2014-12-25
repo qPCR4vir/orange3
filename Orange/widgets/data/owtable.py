@@ -6,6 +6,7 @@ from functools import reduce
 
 from PyQt4 import QtCore
 from PyQt4 import QtGui
+from PyQt4.QtGui import QItemSelectionModel, QItemSelection
 
 from Orange.data import ContinuousVariable
 from Orange.data.storage import Storage
@@ -222,6 +223,14 @@ class ExampleTableModel(QtCore.QAbstractItemModel):
                   self.index(len(self.examples) - 1, len(self.all_attrs) - 1)
                   )
 
+    def reset_sort(self):
+        self.sorted_map = range(len(self.examples))
+        self.emit(QtCore.SIGNAL("layoutChanged()"))
+        self.emit(QtCore.SIGNAL("dataChanged(QModelIndex, QModelIndex)"),
+                  self.index(0, 0),
+                  self.index(len(self.examples) - 1, len(self.all_attrs) - 1)
+                  )
+
 
 #noinspection PyArgumentList
 class TableViewWithCopy(QtGui.QTableView):
@@ -287,7 +296,7 @@ class OWDataTable(widget.OWWidget):
     show_distributions = Setting(False)
     dist_color_RGB = Setting((220, 220, 220, 255))
     show_attribute_labels = Setting(True)
-    auto_commit = Setting(False)
+    auto_commit = Setting(True)
     selected_schema_index = Setting(0)
     color_by_class = Setting(True)
 
@@ -302,10 +311,15 @@ class OWDataTable(widget.OWWidget):
         self.color_by_class = True
 
         info_box = gui.widgetBox(self.controlArea, "Info")
-        self.info_ex = gui.widgetLabel(info_box, 'No data on input.')
+        self.info_ex = gui.widgetLabel(info_box, 'No data on input.', )
+        self.info_ex.setWordWrap(True)
         self.info_attr = gui.widgetLabel(info_box, ' ')
+        self.info_attr.setWordWrap(True)
         self.info_class = gui.widgetLabel(info_box, ' ')
+        self.info_class.setWordWrap(True)
         self.info_meta = gui.widgetLabel(info_box, ' ')
+        self.info_meta.setWordWrap(True)
+
         gui.separator(info_box)
         gui.button(info_box, self, "Restore Original Order",
                    callback=self.reset_sort_clicked,
@@ -321,9 +335,9 @@ class OWDataTable(widget.OWWidget):
         self.c_show_attribute_labels.setEnabled(True)
         gui.checkBox(box, self, "show_distributions",
                      'Visualize continuous values',
-                     callback=self.cbShowDistributions)
+                     callback=self.cb_show_distributions)
         gui.checkBox(box, self, "color_by_class", 'Color by instance classes',
-                     callback=self.cbShowDistributions)
+                     callback=self.cb_show_distributions)
         gui.button(box, self, "Set colors", self.set_colors,
                    tooltip="Set the background color and color palette")
 
@@ -343,9 +357,10 @@ class OWDataTable(widget.OWWidget):
 
         # GUI with tabs
         self.tabs = gui.tabWidget(self.mainArea)
+        self.tabs.sizeHint = lambda: QtCore.QSize(600,500)
         self.id2table = {}  # key: widget id, value: table
         self.table2id = {}  # key: table, value: widget id
-        self.tabs.currentChanged.connect(self.tabClicked)
+        self.tabs.currentChanged.connect(self.tab_clicked)
         self.selectionChangedFlag = False
 
     def create_color_dialog(self):
@@ -381,7 +396,7 @@ class OWDataTable(widget.OWWidget):
 
             table = TableViewWithCopy()     # QTableView()
             table.setSelectionBehavior(QtGui.QAbstractItemView.SelectRows)
-            table.setSortingEnabled(True)
+            table.setSortingEnabled(False)
             table.setHorizontalScrollMode(QtGui.QTableWidget.ScrollPerPixel)
             table.horizontalHeader().setMovable(True)
             table.horizontalHeader().setClickable(True)
@@ -397,18 +412,13 @@ class OWDataTable(widget.OWWidget):
             self.id2table[tid] = table
             self.table2id[table] = tid
             tab_name = getattr(data, "name", "")
-            if tab_name:
-                tab_name += " "
-            tab_name += "(" + str(tid[1]) + ")"
-            if tid[2] is not None:
-                tab_name += " [" + str(tid[2]) + "]"
             self.tabs.addTab(table, tab_name)
 
             self.progressBarInit()
-            self.setTable(table, data)
+            self.set_table(table, data)
             self.progressBarFinished()
             self.tabs.setCurrentIndex(self.tabs.indexOf(table))
-            self.setInfo(data)
+            self.set_info(data)
             self.send_button.setEnabled(not self.auto_commit)
 
         elif tid in self.data:
@@ -417,14 +427,16 @@ class OWDataTable(widget.OWWidget):
             table.hide()
             self.tabs.removeTab(self.tabs.indexOf(table))
             self.table2id.pop(self.id2table.pop(tid))
-            self.setInfo(self.data.get(self.table2id.get(
+            self.set_info(self.data.get(self.table2id.get(
                 self.tabs.currentWidget(), None), None))
+
+        self.tabs.tabBar().setVisible(self.tabs.count() > 1)
 
         if not self.data:
             self.send_button.setEnabled(False)
 
     #TODO Implement
-    def sendReport(self):
+    def send_report(self):
         """
         qTableInstance = self.tabs.currentWidget()
         id = self.table2id.get(qTableInstance, None)
@@ -436,7 +448,7 @@ class OWDataTable(widget.OWWidget):
         """
 
     # Writes data into table, adjusts the column width.
-    def setTable(self, table, data):
+    def set_table(self, table, data):
         if data is None:
             return
         QtGui.qApp.setOverrideCursor(QtCore.Qt.WaitCursor)
@@ -534,21 +546,34 @@ class OWDataTable(widget.OWWidget):
 
     def sort_by_column(self, index):
         table = self.tabs.currentWidget()
-        table.horizontalHeader().setSortIndicatorShown(1)
-        if index == table.oldSortingIndex:
+        if index == table.oldSortingIndex and index != -1:
             order = (table.oldSortingOrder == QtCore.Qt.AscendingOrder and
                      QtCore.Qt.DescendingOrder or QtCore.Qt.AscendingOrder)
         else:
             order = QtCore.Qt.AscendingOrder
-        table.sortByColumn(index, order)
+        oldsel = self.get_current_selection()
+        model = table.model()
+        if index == -1:
+            table.horizontalHeader().setSortIndicatorShown(False)
+            model.reset_sort()
+        else:
+            table.horizontalHeader().setSortIndicatorShown(1)
+            table.sortByColumn(index, order)
+        newsort = sorted(enumerate(model.sorted_map), key=lambda x: x[1])
+        newsel = [ newsort[a][0] for a in oldsel ]
+        itemsel = QItemSelection()
+        for a in newsel:
+            itemsel.select(model.index(a, 0), model.index(a, 0))
+        table.selectionModel().select(itemsel, QItemSelectionModel.Rows | \
+            QItemSelectionModel.Select | QItemSelectionModel.Clear)
         table.oldSortingIndex = index
         table.oldSortingOrder = order
 
-    def tabClicked(self, index):
+    def tab_clicked(self, index):
         """Updates the info box when a tab is clicked."""
         qTableInstance = self.tabs.widget(index)
         tid = self.table2id.get(qTableInstance, None)
-        self.setInfo(self.data.get(tid, None))
+        self.set_info(self.data.get(tid, None))
         self.update_selection()
 
     def draw_attribute_labels(self, table):
@@ -567,7 +592,7 @@ class OWDataTable(widget.OWWidget):
         for table in self.table2id:
             self.draw_attribute_labels(table)
 
-    def cbShowDistributions(self):
+    def cb_show_distributions(self):
         for ti in range(self.tabs.count()):
             color_schema = self.discPalette if self.color_by_class else None
             if self.show_distributions:
@@ -584,12 +609,7 @@ class OWDataTable(widget.OWWidget):
     def reset_sort_clicked(self):
         table = self.tabs.currentWidget()
         if table:
-            tid = self.table2id[table]
-            data = self.data[tid]
-            table.horizontalHeader().setSortIndicatorShown(False)
-            self.progressBarInit()
-            self.setTable(table, data)
-            self.progressBarFinished()
+            self.sort_by_column(-1)
 
     __no_missing = [""] * 3
 
@@ -620,7 +640,7 @@ class OWDataTable(widget.OWWidget):
             descriptions = self.__no_missing
         return descriptions
 
-    def setInfo(self, data):
+    def set_info(self, data):
         """Updates data info."""
         def sp(n):
             if n == 0:
@@ -655,7 +675,8 @@ class OWDataTable(widget.OWWidget):
             threading.Thread(target=update_num_inst).start()
 
             self.info_attr.setText("%s feature%s" %
-                    sp(len(data.domain.attributes)) + descriptions[0])
+                                   sp(len(data.domain.attributes)) +
+                                   descriptions[0])
 
             self.info_meta.setText("%s meta attribute%s" %
                                    sp(len(data.domain.metas)) + descriptions[2])

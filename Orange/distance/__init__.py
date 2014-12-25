@@ -1,49 +1,122 @@
 import numpy as np
-from scipy import stats
-from sklearn import metrics
+from scipy import stats, sparse
+from sklearn import metrics, preprocessing
 
+import Orange
 from Orange import data
 from Orange.misc import DistMatrix
 
 
-class Euclidean():
-    """Euclidean distance."""
-    def __call__(self, e1, e2=None, axis=1):
+def _impute(data):
+    """Imputation transformer for completing missing values."""
+    imp_data = Orange.data.Table(data)
+    imp_data.X = preprocessing.Imputer().fit_transform(imp_data.X)
+    imp_data.X = imp_data.X if sparse.issparse(imp_data.X) else np.squeeze(imp_data.X)
+    return imp_data
+
+
+def _orange_to_numpy(x):
+    """Convert :class:`Orange.data.Table` and :class:`Orange.data.RowInstance` to :class:`numpy.ndarray`."""
+    if isinstance(x, data.Table):
+        return x.X
+    elif isinstance(x, data.RowInstance):
+        return x.x
+    else:
+        return x
+
+
+class SklDistance():
+    """Generic scikit-learn distance."""
+    def __init__(self, metric):
+        """
+        :param metric: The metric to be used for distance calculation
+        :type metric: str
+        """
+        self.metric = metric
+
+    def __call__(self, e1, e2=None, axis=1, **kwargs):
+        """
+        Method for calculating distances.
+
+        :param e1: input data instances
+        :type e1: :class:`Orange.data.Table` or :class:`Orange.data.RowInstance` or :class:`numpy.ndarray`
+        :param e2: optional second argument for data instances
+           if provided, distances between each pair, where first item is from e1 and second is from e2, are calculated
+        :type e2: :class:`Orange.data.Table` or :class:`Orange.data.RowInstance` or :class:`numpy.ndarray`
+        :param axis: if axis=1 we calculate distances between rows,
+           if axis=0 we calculate distances between columns
+        :type axis: int
+        :param kwargs: used just for Mahalanobis for passing inverse of covariance matrix
+        :return: the matrix with distances between given examples
+        :rtype: :class:`Orange.misc.DistMatrix`
+        """
+        x1 = _orange_to_numpy(e1)
+        x2 = _orange_to_numpy(e2)
         if axis == 0:
-            if isinstance(e1, data.Table):
-                e1 = e1.X.T
-            if e2 is not None and isinstance(e2, data.Table):
-                e2 = e2.X.T
-        dist = metrics.pairwise.pairwise_distances(e1, e2, metric='euclidean')
-        if dist.size == 1:
-            dist = dist[0, 0]
+            x1 = x1.T
+            if x2 is not None:
+                x2 = x2.T
+        if not sparse.issparse(x1):
+            x1 = np.atleast_2d(x1)
+        if e2 is not None and not sparse.issparse(x2):
+            x2 = np.atleast_2d(x2)
+        dist = metrics.pairwise.pairwise_distances(x1, x2, metric=self.metric, **kwargs)
+        if isinstance(e1, data.Table) or isinstance(e1, data.RowInstance):
+            dist = DistMatrix(dist, e1, e2)
         else:
             dist = DistMatrix(dist)
         return dist
 
 
-class Mahalanobis():
-    """ Mahalanobis distance."""
-    def __call__(self, e1, e2=None, VI=None, axis=1):
-        if axis == 0:
-            if isinstance(e1, data.Table):
-                e1 = e1.X.T
-            if e2 is not None and isinstance(e2, data.Table):
-                e2 = e2.X.T
-        dist = metrics.pairwise.pairwise_distances(e1, e2, metric='mahalanobis', VI=VI)
-        if dist.size == 1:
-            dist = dist[0, 0]
-        else:
-            dist = DistMatrix(dist)
-        return dist
+class SklMahalanobis(SklDistance):
+    """Mahalanobis class."""
+    def __init__(self):
+        self.metric = 'mahalanobis'
+
+    def __call__(self, e1, e2=None, axis=1, VI=None):
+        """
+        Method for calculating distances.
+
+        :param e1: input data instances
+        :type e1: :class:`Orange.data.Table` or :class:`Orange.data.RowInstance` or :class:`numpy.ndarray`
+        :param e2: optional second argument for data instances
+           if provided, distances between each pair, where first item is from e1 and second is from e2, are calculated
+        :type e2: :class:`Orange.data.Table` or :class:`Orange.data.RowInstance` or :class:`numpy.ndarray`
+        :param axis: if axis=1 we calculate distances between rows,
+           if axis=0 we calculate distances between columns
+        :type axis: int
+        :param VI: the inverse of the covariance matrix
+        :type VI: nd.array
+        :return: the matrix with distances between given examples
+        :rtype: :class:`Orange.misc.DistMatrix`
+        """
+        return super().__call__(e1, e2, axis, VI=VI)
 
 
-class SpearmanR():
-    """Spearman's rank correlation coefficient."""
+Euclidean = SklDistance('euclidean')
+Manhattan = SklDistance('manhattan')
+Cosine = SklDistance('cosine')
+Jaccard = SklDistance('jaccard')
+Mahalanobis = SklMahalanobis()
+
+
+class SpearmanDistance():
+    """ Generic Spearman's rank correlation coefficient. """
+    def __init__(self, absolute):
+        self.absolute = absolute
+
     def __call__(self, e1, e2=None, axis=1):
         """
-        :param e1: data instances.
-        :param e2: data instances.
+        :param e1: input data instances
+        :type e1: :class:`Orange.data.Table` or :class:`Orange.data.RowInstance` or :class:`numpy.ndarray`
+        :param e2: optional second argument for data instances
+           if provided, distances between each pair, where first item is from e1 and second is from e2, are calculated
+        :type e2: :class:`Orange.data.Table` or :class:`Orange.data.RowInstance` or :class:`numpy.ndarray`
+        :param axis: if axis=1 we calculate distances between rows,
+           if axis=0 we calculate distances between columns
+        :type axis: int
+        :return: the matrix with distances between given examples
+        :rtype: :class:`Orange.misc.DistMatrix`
 
         Returns Spearman's dissimilarity between e1 and e2,
         i.e.
@@ -52,59 +125,60 @@ class SpearmanR():
 
         where r is Spearman's rank coefficient.
         """
-        x1 = e1.x if isinstance(e1, data.RowInstance) else e1.X
-        if e2 is not None:
-            x2 = e2.x if isinstance(e2, data.RowInstance) else e2.X
-        else:
+        x1 = _orange_to_numpy(e1)
+        x2 = _orange_to_numpy(e2)
+        if x2 is None:
             x2 = x1
         if x1.ndim == 1 or x2.ndim == 1:
             axis = 0
-            slc = len(e1) if x1.ndim > 1 else 1
+            slc = len(x1) if x1.ndim > 1 else 1
         else:
-            slc = len(e1) if axis == 1 else len(e1.domain.attributes)
+            slc = len(x1) if axis == 1 else x1.shape[1]
+        # stats.spearmanr does not work when e1=Table and e2=RowInstance
+        # so we replace e1 and e2 and then transpose the result
+        transpose = False
+        if x1.ndim == 2 and x2.ndim == 1:
+            x1, x2 = x2, x1
+            slc = len(e1) if x1.ndim > 1 else 1
+            transpose = True
         rho, _ = stats.spearmanr(x1, x2, axis=axis)
-        dist = (1. - rho) / 2.
-        if isinstance(dist, np.ndarray):
+        if self.absolute:
+            dist = (1. - np.abs(rho)) / 2.
+        else:
+            dist = (1. - rho) / 2.
+        if isinstance(dist, np.float):
+            dist = np.array([[dist]])
+        elif isinstance(dist, np.ndarray):
             dist = dist[:slc, slc:]
+        if transpose:
+           dist = dist.T
+        if isinstance(e1, data.Table) or isinstance(e1, data.RowInstance):
+            dist = DistMatrix(dist, e1, e2)
+        else:
             dist = DistMatrix(dist)
         return dist
 
+SpearmanR = SpearmanDistance(absolute=False)
+SpearmanRAbsolute = SpearmanDistance(absolute=True)
 
-class SpearmanRAbsolute():
-    """Spearman's absolute rank correlation coefficient."""
+
+class PearsonDistance():
+    """ Generic Pearson's rank correlation coefficient. """
+    def __init__(self, absolute):
+        self.absolute = absolute
+
     def __call__(self, e1, e2=None, axis=1):
         """
-        Return absolute Spearman's dissimilarity between e1 and e2,
-        i.e.
-
-        .. math:: (1 - abs(r))/2
-
-        where r is Spearman's correlation coefficient.
-        """
-        x1 = e1.x if isinstance(e1, data.RowInstance) else e1.X
-        if e2 is not None:
-            x2 = e2.x if isinstance(e2, data.RowInstance) else e2.X
-        else:
-            x2 = x1
-        if x1.ndim == 1 or x2.ndim == 1:
-            axis = 0
-            slc = len(e1) if x1.ndim > 1 else 1
-        else:
-            slc = len(e1) if axis == 1 else len(e1.domain.attributes)
-        rho, _ = stats.spearmanr(x1, x2, axis=axis)
-        dist = (1. - np.abs(rho)) / 2.
-        if isinstance(dist, np.ndarray):
-            dist = dist[:slc, slc:]
-            dist = DistMatrix(dist)
-        return dist
-
-
-class PearsonR():
-    """Pearson's rank correlation coefficient."""
-    def __call__(self, e1, e2=None, axis=1):
-        """
-        :param e1: data instances.
-        :param e2: data instances.
+        :param e1: input data instances
+        :type e1: :class:`Orange.data.Table` or :class:`Orange.data.RowInstance` or :class:`numpy.ndarray`
+        :param e2: optional second argument for data instances
+           if provided, distances between each pair, where first item is from e1 and second is from e2, are calculated
+        :type e2: :class:`Orange.data.Table` or :class:`Orange.data.RowInstance` or :class:`numpy.ndarray`
+        :param axis: if axis=1 we calculate distances between rows,
+           if axis=0 we calculate distances between columns
+        :type axis: int
+        :return: the matrix with distances between given examples
+        :rtype: :class:`Orange.misc.DistMatrix`
 
         Returns Pearson's dissimilarity between e1 and e2,
         i.e.
@@ -113,67 +187,28 @@ class PearsonR():
 
         where r is Pearson's rank coefficient.
         """
-        # get data from Orange.data.Table to numpy.array
-        x1 = e1.x if isinstance(e1, data.RowInstance) else e1.X
-        if e2 is not None:
-            x2 = e2.x if isinstance(e2, data.RowInstance) else e2.X
-        else:
+        x1 = _orange_to_numpy(e1)
+        x2 = _orange_to_numpy(e2)
+        if x2 is None:
             x2 = x1
-        # transform
         if axis == 0:
             x1 = x1.T
             x2 = x2.T
-        # prepare so, that can be used for iterator
         if x1.ndim == 1:
             x1 = list([x1])
         if x2.ndim == 1:
             x2 = list([x2])
-        # TODO: implement pearson that works on full matrices
         rho = np.array([[stats.pearsonr(i, j)[0] for j in x2] for i in x1])
-        dist = (1. - rho) / 2.
-        # if only one, return float, else matrix
-        if dist.size == 1:
-            dist = dist[0][0]
+        if self.absolute:
+            dist = (1. - np.abs(rho)) / 2.
+        else:
+            dist = (1. - rho) / 2.
+        if isinstance(e1, data.Table) or isinstance(e1, data.RowInstance):
+            dist = DistMatrix(dist, e1, e2)
         else:
             dist = DistMatrix(dist)
         return dist
 
 
-class PearsonRAbsolute():
-    """Pearson's absolute rank correlation coefficient."""
-    def __call__(self, e1, e2=None, axis=1):
-        """
-        :param e1: data instances.
-        :param e2: data instances.
-
-        Returns absolute Pearson's dissimilarity between e1 and e2,
-        i.e.
-
-        .. math:: (1-abs(r))/2
-
-        where r is Pearson's rank coefficient.
-        """
-        # get data from Orange.data.Table to numpy.array
-        x1 = e1.x if isinstance(e1, data.RowInstance) else e1.X
-        if e2 is not None:
-            x2 = e2.x if isinstance(e2, data.RowInstance) else e2.X
-        else:
-            x2 = x1
-        # transform
-        if axis == 0:
-            x1 = x1.T
-            x2 = x2.T
-        # prepare so, that can be used for iterator
-        if x1.ndim == 1:
-            x1 = list([x1])
-        if x2.ndim == 1:
-            x2 = list([x2])
-        # TODO: implement pearson that works on full matrices
-        rho = np.array([[stats.pearsonr(i, j)[0] for j in x2] for i in x1])
-        dist = (1. - np.abs(rho)) / 2.
-        # if only one, return float, else matrix
-        if dist.size == 1:
-            dist = dist[0][0]
-        else:
-            dist = DistMatrix(dist)
-        return dist
+PearsonR = PearsonDistance(absolute=False)
+PearsonRAbsolute = PearsonDistance(absolute=True)

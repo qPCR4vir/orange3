@@ -46,7 +46,7 @@ class OWScatterPlot(OWWidget):
 
     settingsHandler = DomainContextHandler()
 
-    auto_send_selection = Setting(False)
+    auto_send_selection = Setting(True)
     toolbar_selection = Setting(0)
     color_settings = Setting(None)
     selected_schema_index = Setting(0)
@@ -155,9 +155,6 @@ class OWScatterPlot(OWWidget):
         self.zoom_select_toolbar.buttons[OWPlotGUI.SendSelection].setEnabled(
             not self.auto_send_selection)
 
-        self.mainArea.setMinimumWidth(700)
-        self.mainArea.setMinimumHeight(550)
-
         # self.vizrank = OWVizRank(self, self.signalManager, self.graph,
         #                          orngVizRank.SCATTERPLOT, "ScatterPlot")
         # self.optimizationDlg = self.vizrank
@@ -199,12 +196,6 @@ class OWScatterPlot(OWWidget):
         # TODO: adapt scatter plot to work on SqlTables (avoid use of X and Y)
         if isinstance(self.data, SqlTable):
             self.data.download_data()
-            for i, row in enumerate(data):
-                self.data.X[i] = [row[attr]
-                                  for attr in self.data.domain.attributes]
-                if self.data.domain.class_vars:
-                    self.data.Y[i] = [row[cv]
-                                      for cv in self.data.domain.class_vars]
 
         # self.vizrank.clearResults()
         if not same_domain:
