@@ -35,7 +35,6 @@ class OWPurgeDomain(widget.OWWidget):
 
         self.preRemoveValues = 1
         self.preRemoveClasses = 1
-        self.dataChanged = False
 
         self.removedAttrs = "-"
         self.reducedAttrs = "-"
@@ -85,20 +84,15 @@ class OWPurgeDomain(widget.OWWidget):
         gui.label(box3, self, "Resorted attributes: %(resortedAttrs)s")
         gui.label(box3, self, "Class attribute: %(classAttr)s")
 
-        box2 = gui.widgetBox(self.controlArea, "Send")
-        btSend = gui.button(box2, self, "Send data",
-                            callback=self.process,
-                            default=True)
-        cbAutoSend = gui.checkBox(box2, self, "autoSend", "Send automatically")
-
-        gui.setStopper(self, btSend, cbAutoSend, "dataChanged", self.process)
-
+        gui.auto_commit(self.controlArea, self, "autoSend", "Send Data",
+                        checkbox_label="Send automatically",
+                        orientation="horizontal")
         gui.rubber(self.controlArea)
 
     def setData(self, dataset):
         if dataset is not None:
             self.data = dataset
-            self.process()
+            self.unconditional_commit()
         else:
             self.removedAttrs = "-"
             self.reducedAttrs = "-"
@@ -106,7 +100,6 @@ class OWPurgeDomain(widget.OWWidget):
             self.classAttr = "-"
             self.send("Data", None)
             self.data = None
-        self.dataChanged = False
 
     def removeAttributesChanged(self):
         if not self.removeAttributes:
@@ -125,12 +118,9 @@ class OWPurgeDomain(widget.OWWidget):
         self.optionsChanged()
 
     def optionsChanged(self):
-        if self.autoSend:
-            self.process()
-        else:
-            self.dataChanged = True
+        self.commit()
 
-    def process(self):
+    def commit(self):
         if self.data is None:
             return
 
@@ -191,8 +181,6 @@ class OWPurgeDomain(widget.OWWidget):
 
         self.send("Data", data)
 
-        self.dataChanged = False
-
 
 import numpy
 from collections import namedtuple
@@ -250,9 +238,9 @@ def merge_transforms(exp):
     elif isinstance(exp, (Reduced, Sorted, Transformed)):
         prev = merge_transforms(exp.sub)
         if isinstance(prev, (Reduced, Sorted, Transformed)):
-            B = exp.var.get_value_from
+            B = exp.var.compute_value
             assert isinstance(B, Lookup)
-            A = B.variable.get_value_from
+            A = B.variable.compute_value
             assert isinstance(A, Lookup)
 
             new_var = Orange.data.DiscreteVariable(
@@ -260,7 +248,7 @@ def merge_transforms(exp):
                 values=exp.var.values,
                 ordered=exp.var.ordered
             )
-            new_var.get_value_from = merge_lookup(A, B)
+            new_var.compute_value = merge_lookup(A, B)
             assert isinstance(prev.sub, Var)
             return Transformed(prev.sub, new_var)
         else:
@@ -358,7 +346,7 @@ def remove_unused_values(var, data):
         if numpy.isfinite(base):
             new_var.base_value = int(base)
 
-    new_var.get_value_from = Lookup(var, translation_table)
+    new_var.compute_value = Lookup(var, translation_table)
     return new_var
 
 
@@ -373,14 +361,14 @@ def sort_var_values(var):
     )
 
     newvar = Orange.data.DiscreteVariable(var.name, values=newvalues)
-    newvar.get_value_from = Lookup(var, translation_table)
+    newvar.compute_value = Lookup(var, translation_table)
     return newvar
 
-from Orange.feature.transformation import Lookup
+from Orange.preprocess.transformation import Lookup
 
 
 class Lookup(Lookup):
-    def _transform(self, column):
+    def transform(self, column):
         mask = numpy.isnan(column)
         column_valid = numpy.where(mask, 0, column)
         values = self.lookup_table[numpy.array(column_valid, dtype=int)]

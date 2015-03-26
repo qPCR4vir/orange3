@@ -46,7 +46,7 @@ CLASSIFIERS = (
 
 INSTALL_REQUIRES = (
     'setuptools',
-    'numpy',
+    'numpy>=1.9.0',
     'scipy',
     'bottlechest',
     "sqlparse"
@@ -94,7 +94,6 @@ def git_version():
         GIT_REVISION = out.strip().decode('ascii')
     except OSError:
         GIT_REVISION = "Unknown"
-
     return GIT_REVISION
 
 
@@ -123,7 +122,7 @@ if not release:
         GIT_REVISION = "Unknown"
 
     if not ISRELEASED:
-        FULLVERSION += '.dev-' + GIT_REVISION[:7]
+        FULLVERSION += '.dev0+' + GIT_REVISION[:7]
 
     a = open(filename, 'w')
     try:
@@ -173,11 +172,15 @@ PACKAGES = [
     "Orange.canvas.styles",
     "Orange.canvas.utils",
     "Orange.classification",
+    "Orange.clustering",
     "Orange.data",
     "Orange.data.sql",
+    "Orange.distance",
     "Orange.evaluation",
-    "Orange.feature",
     "Orange.misc",
+    "Orange.preprocess",
+    "Orange.projection",
+    "Orange.regression",
     "Orange.statistics",
     "Orange.testing",
     "Orange.widgets",

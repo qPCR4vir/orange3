@@ -1,8 +1,11 @@
 import math
 import os
 import re
+import itertools
 from PyQt4 import QtGui, QtCore
 from PyQt4.QtCore import Qt, pyqtSignal as Signal
+
+import Orange.data
 from Orange.widgets.utils import getdeepattr
 from Orange.data import ContinuousVariable, StringVariable, DiscreteVariable, Variable
 from Orange.widgets.utils import vartype
@@ -13,12 +16,7 @@ _enter_icon = None
 __re_label = re.compile(r"(^|[^%])%\((?P<value>[a-zA-Z]\w*)\)")
 
 
-def id_generator(id_):
-    while True:
-        id_ += 1
-        yield id_
-
-OrangeUserRole = id_generator(Qt.UserRole)
+OrangeUserRole = itertools.count(Qt.UserRole)
 
 
 class ControlledAttributesDict(dict):
@@ -636,9 +634,9 @@ def spin(widget, master, value, minv, maxv, step=1, box=None, label=None,
         sbox.setValue(getdeepattr(master, value))
 
     cfront, sbox.cback, sbox.cfunc = connectControl(
-        sbox, master, value, callback,
+        master, value, callback,
         not (callback and callbackOnReturn) and
-        ("valueChanged(int)", "valueChanged(double)")[isDouble],
+        sbox.valueChanged[(int, float)[isDouble]],
         (CallFrontSpin, CallFrontDoubleSpin)[isDouble](sbox))
     if checked:
         cbox.disables = [sbox]
@@ -729,7 +727,7 @@ def checkBox(widget, master, value, label, box=None,
         cbox.setFixedSize(labelWidth, cbox.sizeHint().height())
     cbox.setChecked(getdeepattr(master, value))
 
-    connectControl(cbox, master, value, None, "toggled(bool)",
+    connectControl(master, value, None, cbox.toggled[bool],
                    CallFrontCheckBox(cbox),
                    cfunc=callback and FunctionCallback(
                        master, callback, widget=cbox, getwidget=getwidget,
@@ -902,8 +900,8 @@ def lineEdit(widget, master, value, label=None, labelWidth=None,
         ledit.setValidator(validator)
     if value:
         ledit.cback = connectControl(
-            ledit, master, value,
-            callbackOnType and callback, "textChanged(const QString &)",
+            master, value,
+            callbackOnType and callback, ledit.textChanged[str],
             CallFrontLineEdit(ledit), fvcb=value and valueType)[1]
 
     miscellanea(ledit, b, widget, **misc)
@@ -964,7 +962,7 @@ def button(widget, master, label, callback=None, width=None, height=None,
     if value:
         button.setChecked(getdeepattr(master, value))
         connectControl(
-            button, master, value, None, "toggled(bool)",
+            master, value, None, button.toggled[bool],
             CallFrontButton(button),
             cfunc=callback and FunctionCallback(master, callback,
                                                 widget=button))
@@ -1029,13 +1027,13 @@ def createAttributePixmap(char, background=Qt.black, color=Qt.white):
 class __AttributeIconDict(dict):
     def __getitem__(self, key):
         if not self:
-            for tpe, char, col in ((vartype(ContinuousVariable()), 
-                                        "C", (202, 0, 32)),
-                                  (vartype(DiscreteVariable()), 
-                                        "D", (26, 150, 65)),
-                                  (vartype(StringVariable()), 
-                                        "S", (0, 0, 0)),
-                                  (-1, "?", (128, 128, 128))):
+            for tpe, char, col in ((vartype(ContinuousVariable()),
+                                    "C", (202, 0, 32)),
+                                   (vartype(DiscreteVariable()),
+                                    "D", (26, 150, 65)),
+                                   (vartype(StringVariable()),
+                                    "S", (0, 0, 0)),
+                                   (-1, "?", (128, 128, 128))):
                 self[tpe] = createAttributePixmap(char, QtGui.QColor(*col))
         if key not in self:
             key = vartype(key) if isinstance(key, Variable) else -1
@@ -1125,7 +1123,7 @@ def listBox(widget, master, value=None, labels=None, box=None, callback=None,
             getattr(master, CONTROLLED_ATTRIBUTES)[labels] = CallFrontListBoxLabels(lb)
     if value is not None:
         setattr(master, value, getdeepattr(master, value))
-    connectControl(lb, master, value, callback, "itemSelectionChanged()",
+    connectControl(master, value, callback, lb.itemSelectionChanged,
                    CallFrontListBox(lb), CallBackListBox(lb, master))
 
     misc.setdefault('addSpace', True)
@@ -1174,9 +1172,8 @@ def radioButtons(widget, master, value, btnLabels=(), tooltips=None,
     bg.ogMaster = master
     for i, lab in enumerate(btnLabels):
         appendRadioButton(bg, lab, tooltip=tooltips and tooltips[i])
-    connectControl(bg.group, master, value, callback, "buttonClicked(int)",
+    connectControl(master, value, callback, bg.group.buttonClicked[int],
                    CallFrontRadioButtons(bg), CallBackRadioButton(bg, master))
-
     misc.setdefault('addSpace', bool(box))
     miscellanea(bg.group, bg, widget, **misc)
     return bg
@@ -1288,10 +1285,10 @@ def hSlider(widget, master, value, box=None, minValue=0, maxValue=10, step=1,
             slider.setSingleStep(step)
             slider.setPageStep(step)
             slider.setTickInterval(step)
-        signal_signature = "valueChanged(int)"
+        signal = slider.valueChanged[int]
     else:
         slider = FloatSlider(sliderOrient, minValue, maxValue, step)
-        signal_signature = "valueChangedFloat(double)"
+        signal = slider.valueChangedFloat[float]
     sliderBox.layout().addWidget(slider)
     slider.setValue(getdeepattr(master, value))
     if width:
@@ -1312,11 +1309,9 @@ def hSlider(widget, master, value, box=None, minValue=0, maxValue=10, step=1,
         label.setText(txt)
         label.setLbl = lambda x: \
             label.setText(labelFormat % (x / divideFactor))
-        QtCore.QObject.connect(slider, QtCore.SIGNAL(signal_signature),
-                               label.setLbl)
+        signal.connect(label.setLbl)
 
-    connectControl(slider, master, value, callback, signal_signature,
-                   CallFrontHSlider(slider))
+    connectControl(master, value, callback, signal, CallFrontHSlider(slider))
 
     miscellanea(slider, sliderBox, widget, **misc)
     return slider
@@ -1384,10 +1379,9 @@ def labeledSlider(widget, master, value, box=None,
             value_label.setText(labelFormat % x)
     else:
         value_label.set_label = lambda x: value_label.setText(labelFormat(x))
-    QtCore.QObject.connect(slider, QtCore.SIGNAL("valueChanged(int)"),
-                           value_label.set_label)
+    slider.valueChanged[int].connect(value_label.set_label)
 
-    connectControl(slider, master, value, callback, "valueChanged(int)",
+    connectControl(master, value, callback, slider.valueChanged[int],
                    CallFrontLabeledSlider(slider, labels),
                    CallBackLabeledSlider(slider, master, labels))
 
@@ -1458,10 +1452,9 @@ def valueSlider(widget, master, value, box=None, label=None,
     value_label.setFixedSize(max_label_size, value_label.sizeHint().height())
     value_label.setText(labelFormat(getdeepattr(master, value)))
     value_label.set_label = lambda x: value_label.setText(labelFormat(values[x]))
-    QtCore.QObject.connect(slider, QtCore.SIGNAL("valueChanged(int)"),
-                           value_label.set_label)
+    slider.valueChanged[int].connect(value_label.set_label)
 
-    connectControl(slider, master, value, callback, "valueChanged(int)",
+    connectControl(master, value, callback, slider.valueChanged[int],
                    CallFrontLabeledSlider(slider, values),
                    CallBackLabeledSlider(slider, master, values))
 
@@ -1551,16 +1544,15 @@ def comboBox(widget, master, value, box=None, label=None, labelWidth=None,
                 control2attributeDict = {}
             if emptyString:
                 control2attributeDict[emptyString] = ""
-            connectControl(combo, master, value, callback,
-                           "activated(const QString &)",
-                           CallFrontComboBox(combo, valueType,
-                                             control2attributeDict),
-                           ValueCallbackCombo(master, value, valueType,
-                                              control2attributeDict))
+            connectControl(
+                master, value, callback, combo.activated[str],
+                CallFrontComboBox(combo, valueType, control2attributeDict),
+                ValueCallbackCombo(master, value, valueType,
+                                   control2attributeDict))
         else:
-            connectControl(combo, master, value, callback, "activated(int)",
-                           CallFrontComboBox(combo, None,
-                                             control2attributeDict))
+            connectControl(
+                master, value, callback, combo.activated[int],
+                CallFrontComboBox(combo, None, control2attributeDict))
     miscellanea(combo, hb, widget, **misc)
     return combo
 
@@ -1931,58 +1923,90 @@ class widgetHider(QtGui.QWidget):
 ##############################################################################
 # callback handlers
 
-def setStopper(master, sendButton, stopCheckbox, changedFlag, callback):
+
+def auto_commit(widget, master, value, label, auto_label=None, box=True,
+                checkbox_label=None, orientation=None, **misc):
     """
-    Arrange the mechanics needed for a typical combination of the check box
-    "Commit on change" and push button "Commit".
+    Add a commit button with auto-commit check box.
 
-    The function tells the check box to disable the send button when the box is
-    checked (this is done by adding `(-1, sendButton)` to the checkbox's list
-    `disables`; the already disables the button if the box is checked now.
+    The widget must have a commit method and a setting that stores whether
+    auto-commit is on.
 
-    The function connects a new callback to the checkbox's signal `toggled`
-    to call the `callback` when the box is checked and the data has been
-    changed, as indicated by the value of `changedFlag`.
+    The function replaces the commit method with a new commit method that
+    checks whether auto-commit is on. If it is, it passes the call to the
+    original commit, otherwise it sets the dirty flag.
 
-    To set up the Commit-on-change---Commit interface, do the following. In
-    the widget add something like::
+    The checkbox controls the auto-commit. When auto-commit is switched on, the
+    checkbox callback checks whether the dirty flag is on and calls the original
+    commit.
 
-        commitButton = gui.button(box, self, "Commit", callback=self.apply)
-        autoCommit = gui.checkBox(box, self, "autoCommit", "Commit on change")
-        gui.setStopper(self, commitButton, autoCommit, "dataDirty", self.apply)
+    Important! Do not connect any signals to the commit before calling
+    auto_commit.
 
-    Whenever the data is changed and could be commited, call a method like::
-
-        def applyIf(self):
-        if self.autoApply:
-            self.apply()
-        else:
-            self.dataDirty = True
-
-    The method can have any name, not necessarily `applyIf`. Method `apply`
-    sends the necessary data to signal manager.
-
-    Used like this, `setStopper` tells `autoCommit` checkbox to disable the
-    `commitButton`, and when the check box is checked, it will call
-    `self.apply` if `dataDirty` is `True`.
-
-    :param master: the master widget (used only to get the `changedFlag`)
+    :param widget: the widget into which the box with the button is inserted
+    :type widget: PyQt4.QtGui.QWidget
+    :param value: the master's attribute which stores whether the auto-commit
+        is on
+    :type value:  str
+    :param master: master widget
     :type master: OWWidget or OWComponent
-    :param sendButton: the button for committing the data
-    :type sendButton: PyQt4.QtGui.QPushButton
-    :param stopCheckbox: the check box
-    :type stopCheckbox: PyQt4.QtGui.QCheckBox
-    :param changedFlag: the name of the flag in the master that tells whether
-        the data is changed
-    :type changedFlag: str
-    :param callback: the method (typically of the `master`) that commits the
-        data
-    :type callback: function
+    :param label: The button label
+    :type label: str
+    :param label: The label used when auto-commit is on; default is
+        `"Auto " + label`
+    :type label: str
+    :param box: tells whether the widget has a border, and its label
+    :type box: int or str or None
+    :return: the box
     """
-    stopCheckbox.disables.append((-1, sendButton))
-    sendButton.setDisabled(stopCheckbox.isChecked())
-    stopCheckbox.toggled.connect(
-        lambda x: x and getdeepattr(master, changedFlag, True) and callback())
+    def u():
+        if getattr(master, value):
+            btn.setText(auto_label)
+            btn.setEnabled(False)
+            if dirty:
+                do_commit()
+        else:
+            btn.setText(label)
+            btn.setEnabled(True)
+
+    def commit():
+        nonlocal dirty
+        if getattr(master, value):
+            do_commit()
+        else:
+            dirty = True
+
+    def do_commit():
+        nonlocal dirty
+        master.unconditional_commit()
+        dirty = False
+
+    dirty = False
+    master.unconditional_commit = master.commit
+    if not auto_label:
+        if checkbox_label:
+            auto_label = label
+        else:
+            auto_label = "Auto " + label.lower() + " is on"
+    if isinstance(box, QtGui.QWidget):
+        b = box
+    else:
+        if orientation is None:
+            orientation = bool(checkbox_label)
+        b = widgetBox(widget, box=box, orientation=orientation,
+                      addToLayout=False)
+    b.checkbox = cb = checkBox(b, master, value, checkbox_label or " ",
+                               callback=u, tooltip=auto_label)
+    cb.setSizePolicy(QtGui.QSizePolicy.Preferred, QtGui.QSizePolicy.Preferred)
+    b.button = btn = button(b, master, label, callback=do_commit)
+    if not checkbox_label:
+        btn.setSizePolicy(QtGui.QSizePolicy.Expanding,
+                          QtGui.QSizePolicy.Preferred)
+    u()
+    master.commit = commit
+    miscellanea(b, widget, widget,
+                addToLayout=not isinstance(box, QtGui.QWidget), **misc)
+    return b
 
 
 class ControlledList(list):
@@ -2051,30 +2075,20 @@ class ControlledList(list):
         super().remove(item)
 
 
-def connectControlSignal(control, signal, f):
-    if type(signal) is tuple:
-        control, signal = signal
-    QtCore.QObject.connect(control, QtCore.SIGNAL(signal), f)
-
-
-def connectControl(control, master, value, f, signal,
+def connectControl(master, value, f, signal,
                    cfront, cback=None, cfunc=None, fvcb=None):
     cback = cback or value and ValueCallback(master, value, fvcb)
     if cback:
         if signal:
-            connectControlSignal(control, signal, cback)
+            signal.connect(cback)
         cback.opposite = cfront
         if value and cfront and hasattr(master, CONTROLLED_ATTRIBUTES):
             getattr(master, CONTROLLED_ATTRIBUTES)[value] = cfront
-
     cfunc = cfunc or f and FunctionCallback(master, f)
     if cfunc:
         if signal:
-            connectControlSignal(control, signal, cfunc)
-        cfront.opposite = cback, cfunc
-    else:
-        cfront.opposite = (cback,)
-
+            signal.connect(cfunc)
+        cfront.opposite = tuple(filter(None, (cback, cfunc)))
     return cfront, cback, cfunc
 
 
@@ -2504,55 +2518,36 @@ class TableBarItem(QtGui.QItemDelegate):
     BarRole = next(OrangeUserRole)
     ColorRole = next(OrangeUserRole)
 
-    def __init__(self, widget, table=None, color=QtGui.QColor(255, 170, 127),
+    def __init__(self, parent=None, color=QtGui.QColor(255, 170, 127),
                  color_schema=None):
         """
-        :param widget: OWWidget instance
-        :type widget: :class:`OWWidget.OWWidget
-        :param table: Table
-        :type table: :class:`Orange.data.Table`
-        :param color: Color of the distribution bar.
-        :type color: :class:`PyQt4.QtCore.QColor`
-        :param color_schema: If not None it must be an instance of
+        :param QObject parent: Parent object.
+        :param QColor color: Default color of the distribution bar.
+        :param color_schema:
+            If not None it must be an instance of
             :class:`OWColorPalette.ColorPaletteGenerator` (note: this
             parameter, if set, overrides the ``color``)
         :type color_schema: :class:`OWColorPalette.ColorPaletteGenerator`
-
         """
-        super().__init__(widget)
+        super().__init__(parent)
         self.color = color
         self.color_schema = color_schema
-        self.widget = widget
-        self.table = table
 
     def paint(self, painter, option, index):
-        from Orange.data import DiscreteVariable
         painter.save()
         self.drawBackground(painter, option, index)
-        if self.table is None:
-            table = getattr(index.model(), "examples", None)
-        else:
-            table = self.table
         ratio = index.data(TableBarItem.BarRole)
         if isinstance(ratio, float):
             if math.isnan(ratio):
                 ratio = None
-        elif table is not None and getattr(self.widget, "show_bars", False):
-            value = index.data(Qt.DisplayRole)
-            if isinstance(value, float):
-                col = index.column()
-                if col < len(table.normalizers):
-                    maxv, span = table.normalizers[col]
-                    ratio = (maxv - value) / span
 
         color = self.color
-        if (self.color_schema is not None and table is not None and
-                isinstance(table.domain.class_var, DiscreteVariable)):
+        if self.color_schema is not None and ratio is not None:
             class_ = index.data(TableClassValueRole)
-            if not math.isnan(class_):
+            if isinstance(class_, Orange.data.Value) and \
+                    isinstance(class_.variable, DiscreteVariable) and \
+                    not math.isnan(class_):
                 color = self.color_schema[int(class_)]
-        else:
-            color = self.color
 
         if ratio is not None:
             painter.save()

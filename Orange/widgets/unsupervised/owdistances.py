@@ -9,7 +9,6 @@ _METRICS = [
     ("Manhattan", distance.Manhattan),
     ("Cosine", distance.Cosine),
     ("Jaccard", distance.Jaccard),
-    ("Mahalanobis", distance.Mahalanobis),
     ("Spearman", distance.SpearmanR),
     ("Spearman absolute", distance.SpearmanRAbsolute),
     ("Pearson", distance.PearsonR),
@@ -35,7 +34,6 @@ class OWDistances(widget.OWWidget):
         super().__init__(parent)
 
         self.data = None
-        self._invalidated = False
 
         box = gui.widgetBox(self.controlArea, self.tr("Distances Between"))
         gui.radioButtons(
@@ -49,29 +47,31 @@ class OWDistances(widget.OWWidget):
                      items=list(zip(*_METRICS))[0],
                      callback=self._invalidate)
 
-        box = gui.widgetBox(self.controlArea, self.tr("Commit"))
-        cb = gui.checkBox(box, self, "autocommit", "Commit on any change")
-        b = gui.button(box, self, "Apply", callback=self.commit)
-        gui.setStopper(self, b, cb, "_invalidated", callback=self.commit)
+        gui.auto_commit(self.controlArea, self, "autocommit", "Apply",
+                        checkbox_label="Apply on any change")
 
         self.layout().setSizeConstraint(self.layout().SetFixedSize)
 
     def set_data(self, data):
         self.data = data
-        self.commit()
+        self.unconditional_commit()
 
     def commit(self):
+        self.warning(1)
+        self.error(1)
+
         distances = None
         if self.data is not None:
             metric = _METRICS[self.metric_idx][1]
-            X = self.data
-            X = distance._impute(X)
-            distances = metric(X, X, 1-self.axis)
+            data = distance._preprocess(self.data)
+            if len(data.domain.attributes) == 0:
+                self.error(1, "No continuous features")
+            elif len(self.data.domain.attributes) - len(data.domain.attributes) > 0:
+                self.warning(1, "Ignoring categoric features")
+            if len(data.domain.attributes) != 0:
+                distances = metric(data, data, 1-self.axis)
 
         self.send("Distances", distances)
 
     def _invalidate(self):
-        if self.autocommit:
-            self.commit()
-        else:
-            self._invalidated = True
+        self.commit()

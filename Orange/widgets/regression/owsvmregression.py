@@ -6,6 +6,7 @@ from PyQt4.QtCore import Qt
 
 import Orange.data
 from Orange.classification import svm, SklModel
+from Orange.preprocess.preprocess import Preprocess
 from Orange.widgets import widget, settings, gui
 
 
@@ -16,7 +17,10 @@ class OWSVMRegression(widget.OWWidget):
 
     inputs = [{"name": "Data",
                "type": Orange.data.Table,
-               "handler": "set_data"}]
+               "handler": "set_data"},
+              {"name": "Preprocessor",
+               "type": Preprocess,
+               "handler": "set_preprocessor"}]
     outputs = [{"name": "Learner",
                 "type": svm.SVRLearner},
                {"name": "Predictor",
@@ -57,6 +61,7 @@ class OWSVMRegression(widget.OWWidget):
         super().__init__(parent)
 
         self.data = None
+        self.preprocessors = None
 
         box = gui.widgetBox(self.controlArea, self.tr("Name"))
         gui.lineEdit(box, self, "learner_name")
@@ -163,6 +168,13 @@ class OWSVMRegression(widget.OWWidget):
         if data is not None:
             self.apply()
 
+    def set_preprocessor(self, preproc):
+        if preproc is None:
+            self.preprocessors = None
+        else:
+            self.preprocessors = (preproc,)
+        self.apply()
+
     def apply(self):
         kernel = ["linear", "poly", "rbf", "sigmoid"][self.kernel_type]
         common_args = dict(
@@ -171,6 +183,7 @@ class OWSVMRegression(widget.OWWidget):
             gamma=self.gamma,
             coef0=self.coef0,
             tol=self.tol,
+            preprocessors=self.preprocessors
         )
         if self.svrtype == OWSVMRegression.Epsilon_SVR:
             learner = svm.SVRLearner(

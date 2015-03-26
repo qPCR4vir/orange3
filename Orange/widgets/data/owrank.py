@@ -6,15 +6,14 @@ Rank (score) features for prediction.
 
 """
 
-
 from collections import namedtuple
 
-from PyQt4 import QtGui, QtCore
+from PyQt4 import QtGui
 from PyQt4.QtCore import Qt
 
 import Orange
-from Orange.feature import scoring
-
+from Orange.preprocess import score
+import Orange.preprocess.discretize
 from Orange.widgets import widget, settings, gui
 
 
@@ -66,18 +65,18 @@ class score_meta(_score_meta):
 # Default scores.
 SCORES = [
     score_meta(
-        "Information Gain", "Inf. gain", scoring.InfoGain,
+        "Information Gain", "Inf. gain", score.InfoGain,
         supports_regression=False,
         supports_classification=True,
         handles_continuous=False,
         handles_discrete=True),
     score_meta(
-        "Gain Ratio", "Gain Ratio", scoring.GainRatio,
+        "Gain Ratio", "Gain Ratio", score.GainRatio,
         supports_regression=False,
         handles_continuous=False,
         handles_discrete=True),
     score_meta(
-        "Gini Gain", "Gini", scoring.Gini,
+        "Gini Gain", "Gini", score.Gini,
         supports_regression=False,
         supports_classification=True,
         handles_continuous=False),
@@ -99,7 +98,7 @@ class OWRank(widget.OWWidget):
 
     selectMethod = settings.Setting(SelectNBest)
     nSelected = settings.Setting(5)
-    autoApply = settings.Setting(True)
+    auto_apply = settings.Setting(True)
 
     # Header state for discrete/continuous scores
     headerState = settings.Setting((None, None))
@@ -157,13 +156,8 @@ class OWRank(widget.OWWidget):
 
         selMethBox.layout().addLayout(grid)
 
-        applyButton = gui.button(
-            selMethBox, self, "Commit", callback=self.apply, default=True,
-            addSpace=4)
-        autoApplyCB = gui.checkBox(
-            selMethBox, self, "autoApply", "Commit automatically")
-        gui.setStopper(
-            self, applyButton, autoApplyCB, "dataChanged", self.apply)
+        gui.auto_commit(self.controlArea, self, "auto_apply", "Commit",
+                        checkbox_label="Commit on any change")
 
         gui.rubber(self.controlArea)
 
@@ -301,7 +295,7 @@ class OWRank(widget.OWWidget):
                                          len(attrs)), None)
             self.updateScores()
 
-        self.applyIf()
+        self.unconditional_commit()
 
     def updateScores(self, measuresMask=None):
         """
@@ -344,7 +338,7 @@ class OWRank(widget.OWWidget):
                 s = None
                 if attr is not None:
                     try:
-                        s = float(estimator(attr, data))
+                        s = float(estimator(data, attr))
                     except Exception as ex:
                         self.warning(index, "Error evaluating %r: %r" %
                                      (meas.name, str(ex)))
@@ -391,14 +385,13 @@ class OWRank(widget.OWWidget):
         self.data = None
         self.discretizedData = None
         self.usefulAttributes = []
-        self.dataChanged = False
         self.ranksModel.setRowCount(0)
 
     def onSelectionChanged(self, *args):
         """
         Called when the ranks view selection changes.
         """
-        self.applyIf()
+        self.data_changed()
 
     def onSelectItem(self, index):
         """
@@ -406,7 +399,7 @@ class OWRank(widget.OWWidget):
         """
         self.selectMethod = OWRank.SelectManual  # Manual
         self.selectButtons.button(self.selectMethod).setChecked(True)
-        self.applyIf()
+        self.data_changed()
 
     def setSelectMethod(self, method):
         if self.selectMethod != method:
@@ -426,7 +419,7 @@ class OWRank(widget.OWWidget):
 
     def getDiscretizedData(self):
         if not self.discretizedData:
-            discretizer = Orange.feature.discretization.EqualFreq(n=4)
+            discretizer = Orange.preprocess.discretize.EqualFreq(n=4)
             contAttrs = [attr for attr in self.data.domain.attributes
                          if is_continuous(attr)]
             at = []
@@ -518,23 +511,18 @@ class OWRank(widget.OWWidget):
         self.reportData(self.data)
         self.reportRaw(gui.reportTable(self.ranksView))
 
-    def applyIf(self):
-        if self.autoApply:
-            self.apply()
-        else:
-            self.dataChanged = True
+    def data_changed(self):
+        self.commit()
 
-    def apply(self):
+    def commit(self):
         selected = self.selectedAttrs()
         if not self.data or not selected:
             self.send("Reduced Data", None)
         else:
-
             domain = Orange.data.Domain(selected, self.data.domain.class_var,
                                         metas=self.data.domain.metas)
             data = Orange.data.Table(domain, self.data)
             self.send("Reduced Data", data)
-        self.dataChanged = False
 
     def selectedAttrs(self):
         if self.data:

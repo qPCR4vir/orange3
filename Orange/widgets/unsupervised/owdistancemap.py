@@ -1,17 +1,16 @@
-
-import numpy
 from functools import reduce
 from operator import iadd
+import itertools
+
+import numpy
 
 from PyQt4.QtGui import (
-    QSlider, QLabel, QFormLayout, QGraphicsRectItem, QGraphicsGridLayout,
+    QFormLayout, QGraphicsRectItem, QGraphicsGridLayout,
     QFontMetrics, QPen, QIcon, QPixmap, QLinearGradient, QPainter, QColor,
-    QBrush
+    QBrush, QTransform, QGraphicsWidget
 )
 
-from PyQt4.QtCore import (
-    Qt, QEvent, QRect, QRectF, QSize, QSizeF, QPoint, QPointF
-)
+from PyQt4.QtCore import Qt, QRect, QRectF, QSize, QPointF
 from PyQt4.QtCore import pyqtSignal as Signal
 
 import pyqtgraph as pg
@@ -25,62 +24,154 @@ from Orange.widgets.utils import itemmodels, colorbrewer
 from .owhierarchicalclustering import DendrogramWidget, GraphicsSimpleTextList
 
 
+def _remove_item(item):
+    item.setParentItem(None)
+    scene = item.scene()
+    if scene is not None:
+        scene.removeItem(item)
+
+
 class DistanceMapItem(pg.ImageItem):
+    """A distance matrix image with user selectable regions.
+    """
+    class SelectionRect(QGraphicsRectItem):
+        def boundingRect(self):
+            return super().boundingRect().adjusted(-1, 1, 1, -1)
+
+        def paint(self, painter, option, widget=None):
+            t = painter.transform()
+
+            rect = t.mapRect(self.rect())
+
+            painter.save()
+            painter.setTransform(QTransform())
+            pwidth = self.pen().widthF()
+            painter.setPen(self.pen())
+            painter.drawRect(rect.adjusted(pwidth, -pwidth, -pwidth, pwidth))
+            painter.restore()
+
+        def setRect(self, rect):
+            self.prepareGeometryChange()
+            super().setRect(rect)
+
     selectionChanged = Signal()
+
+    Clear, Select, Commit = 1, 2, 4
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.setAcceptedMouseButtons(Qt.LeftButton)
         self.setAcceptHoverEvents(True)
+
         self.__selections = []
         #: (QGraphicsRectItem, QRectF) | None
         self.__dragging = None
 
+    def __select(self, area, command):
+        if command & self.Clear:
+            self.__clearSelections()
+
+        if command & self.Select:
+            area = area.normalized()
+            intersects = [rect.intersects(area)
+                          for item, rect in self.__selections]
+
+            def partition(predicate, iterable):
+                t1, t2 = itertools.tee(iterable)
+                return (itertools.filterfalse(predicate, t1),
+                        filter(predicate, t2))
+
+            def intersects(selection):
+                _, selarea = selection
+                return selarea.intersects(area)
+
+            disjoint, intersection = partition(intersects, self.__selections)
+            disjoint = list(disjoint)
+            intersection = list(intersection)
+
+            # merge intersecting selections into a single area
+            area = reduce(QRect.united, (area for _, area in intersection),
+                          area)
+
+            visualarea = self.__visualRectForSelection(area)
+            item = DistanceMapItem.SelectionRect(visualarea, self)
+            item.update()
+            item.show()
+            pen = QPen(Qt.red, 0)
+            item.setPen(pen)
+
+            selection = disjoint + [(item, area)]
+
+            for item, _ in intersection:
+                _remove_item(item)
+
+            self.__selections = selection
+
+        self.selectionChanged.emit()
+
+    def __elastic_band_select(self, area, command):
+        if command & self.Clear and self.__dragging:
+            item, area = self.__dragging
+            _remove_item(item)
+            self.__dragging = None
+
+        if command & self.Select:
+            if self.__dragging:
+                item, _ = self.__dragging
+            else:
+                item = DistanceMapItem.SelectionRect(self)
+                pen = QPen(Qt.red, 0)
+                item.setPen(pen)
+                self.update()
+
+            # intersection with existing regions
+            intersection = [(item, selarea)
+                            for item, selarea in self.__selections
+                            if area.intersects(selarea)]
+            fullarea = reduce(
+                QRect.united, (selarea for _, selarea in intersection),
+                area
+            )
+            visualarea = self.__visualRectForSelection(fullarea)
+            item.setRect(visualarea)
+
+            self.__dragging = item, area
+
+        if command & self.Commit and self.__dragging:
+            item, area = self.__dragging
+            self.__select(area, self.Select)
+
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
-            i, j = self._cellAt(event.pos())
-            if i != -1 and j != -1:
-                if not event.modifiers() & Qt.ControlModifier:
-                    self.__clearSelections()
-
-                area = QRectF(event.pos(), QSizeF(0, 0))
-                selrange = self._selectionForArea(area)
-                rect = self._visualRectForSelection(selrange)
-                item = QGraphicsRectItem(rect, self)
-                pen = QPen(Qt.red, 0)
-                pen.setCosmetic(True)
-                item.setPen(pen)
-                self.__dragging = item, area
+            r, c = self._cellAt(event.pos())
+            if r != -1 and c != -1:
+                # Clear existing selection
+                # TODO: Fix extended selection.
+                self.__select(QRect(), self.Clear)
+                selrange = QRect(c, r, 2, 2)
+                self.__elastic_band_select(selrange, self.Select | self.Clear)
 
         super().mousePressEvent(event)
         event.accept()
 
     def mouseMoveEvent(self, event):
         if event.buttons() & Qt.LeftButton and self.__dragging:
-            i, j = self._cellAt(event.pos())
-            item, area = self.__dragging
-            area = QRectF(area.topLeft(), event.pos())
-            selrange = self._selectionForArea(area)
-            rect = self._visualRectForSelection(selrange)
-            item.setRect(rect.normalized())
-            self.__dragging = (item, area)
+            r1, c1 = self._cellAt(event.buttonDownPos(Qt.LeftButton))
+            r2, c2 = self._cellAt(event.pos())
+            selrange = QRect(c1, r1, 2, 2).united(QRect(c2, r2, 2, 2))
+            self.__elastic_band_select(selrange, self.Select)
 
         super().mouseMoveEvent(event)
         event.accept()
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.LeftButton and self.__dragging:
-            i, j = self._cellAt(event.pos())
-            item, area = self.__dragging
-            area = QRectF(area.topLeft(), event.pos())
-            selrange = self._selectionForArea(area)
-            rect = self._visualRectForSelection(selrange)
-            item.setRect(rect)
+            r1, c1 = self._cellAt(event.buttonDownPos(Qt.LeftButton))
+            r2, c2 = self._cellAt(event.pos())
+            selrange = QRect(c1, r1, 2, 2).united(QRect(c2, r2, 2, 2))
+            self.__elastic_band_select(selrange, self.Select | self.Commit)
 
-            self.__selections.append((item, area))
-            self.__dragging = None
-
-            self.selectionChanged.emit()
+            self.__elastic_band_select(QRect(), self.Clear)
 
         super().mouseReleaseEvent(event)
         event.accept()
@@ -99,26 +190,25 @@ class DistanceMapItem(pg.ImageItem):
 
     def __clearSelections(self):
         for item, _ in self.__selections:
-            item.setParentItem(None)
-            if item.scene():
-                item.scene().removeItem(item)
+            _remove_item(item)
 
         self.__selections = []
 
-    def _visualRectForSelection(self, rect):
+    def __visualRectForSelection(self, rect):
         h, _ = self.image.shape
         r1, r2 = rect.top(), rect.bottom()
         c1, c2 = rect.left(), rect.right()
-
         return QRectF(QPointF(c1, h - r1), QPointF(c2, h - r2))
 
-    def _selectionForArea(self, area):
+    def __selectionForArea(self, area):
         r1, c1 = self._cellAt(area.topLeft())
         r2, c2 = self._cellAt(area.bottomRight())
-        return QRect(QPoint(c1, r1), QPoint(c2, r2)).normalized()
+        topleft = QRect(c1, r1, 1, 1)
+        bottomright = QRect(c2, r2, 1, 1)
+        return topleft.united(bottomright).normalized()
 
     def selections(self):
-        selections = [self._selectionForArea(area)
+        selections = [self.__selectionForArea(area)
                       for _, area in self.__selections]
         return [(range(r.top(), r.bottom()), range(r.left(), r.right()))
                 for r in selections]
@@ -131,6 +221,11 @@ class DistanceMapItem(pg.ImageItem):
             self.setToolTip("{}, {}: {:.3f}".format(i, j, d))
         else:
             self.setToolTip("")
+
+
+class DendrogramWidget(DendrogramWidget):
+    def sceneEventFilter(self, recv, event):
+        return QGraphicsWidget.sceneEventFilter(self, recv, event)
 
 
 class OWDistanceMap(widget.OWWidget):
@@ -164,8 +259,6 @@ class OWDistanceMap(widget.OWWidget):
         self._sorted_matrix = None
         self._sort_indices = None
         self._selection = None
-
-        self._output_invalidated = False
 
         box = gui.widgetBox(self.controlArea, "Element sorting", margin=0)
         gui.comboBox(box, self, "sorting",
@@ -216,10 +309,8 @@ class OWDistanceMap(widget.OWWidget):
         self.annot_combo.model()[:] = ["None", "Enumeration"]
         self.controlArea.layout().addStretch()
 
-        box = gui.widgetBox(self.controlArea, "Output")
-        cb = gui.checkBox(box, self, "autocommit", "Commit on any change")
-        b = gui.button(box, self, "Commit", callback=self.commit)
-        gui.setStopper(self, b, cb, "_output_invalidated", callback=self.commit)
+        gui.auto_commit(self.controlArea, self, "autocommit",
+                        "Send data", "Auto send is on")
 
         self.view = pg.GraphicsView(background="w")
         self.mainArea.layout().addWidget(self.view)
@@ -303,7 +394,7 @@ class OWDistanceMap(widget.OWWidget):
             self._update_ordering()
             self._setup_scene()
             self._update_labels()
-        self.commit()
+        self.unconditional_commit()
 
     def _clear_plot(self):
         def remove(item):
@@ -337,6 +428,7 @@ class OWDistanceMap(widget.OWWidget):
         self.viewbox.addItem(self.matrix_item)
         self.viewbox.setRange(QRectF(0, 0, *self._sorted_matrix.shape),
                               padding=0)
+
         self.matrix_item.selectionChanged.connect(self._invalidate_selection)
 
         if self.sorting == 0:
@@ -413,14 +505,18 @@ class OWDistanceMap(widget.OWWidget):
             textlist.set_labels(labels or [])
             textlist.setVisible(bool(labels))
 
+        constraint = -1 if labels else 0
+        self.right_labels.setMaximumWidth(constraint)
+        self.bottom_labels.setMaximumHeight(constraint)
+
     def _update_color(self):
         if self.matrix_item:
             name, colors = self.palettes[self.colormap]
             n, colors = max(colors.items())
             colors = numpy.array(colors, dtype=numpy.ubyte)
             low, high = self.color_low * 255, self.color_high * 255
-            points = numpy.linspace(low, high, n, dtype=numpy.float)
-            space = numpy.linspace(0, 255, 255, dtype=numpy.float)
+            points = numpy.linspace(low, high, n)
+            space = numpy.linspace(0, 255, 255)
 
             r = numpy.interp(space, points, colors[:, 0], left=255, right=0)
             g = numpy.interp(space, points, colors[:, 1], left=255, right=0)
@@ -432,17 +528,11 @@ class OWDistanceMap(widget.OWWidget):
         ranges = self.matrix_item.selections()
         ranges = reduce(iadd, ranges, [])
         indices = reduce(iadd, ranges, [])
-
         if self.sorting:
             sortind = self._sort_indices
             indices = [sortind[i] for i in indices]
-
         self._selection = list(sorted(set(indices)))
-
-        if self.autocommit:
-            self.commit()
-        else:
-            self._output_invalidated = True
+        self.commit()
 
     def commit(self):
         datasubset = None
@@ -459,7 +549,6 @@ class OWDistanceMap(widget.OWWidget):
 
         self.send("Data", datasubset)
         self.send("Features", featuresubset)
-        self._output_invalidated = False
 
 
 class TextList(GraphicsSimpleTextList):
@@ -495,31 +584,6 @@ class TextList(GraphicsSimpleTextList):
             fix += 1
             font.setPointSize(height - fix)
         return height - fix
-
-
-class ImageWidget(pg.GraphicsWidget):
-    def __init__(self, image=None, parent=None):
-        super().__init__(parent)
-        self._image = image
-        self._image.setParentItem(self)
-
-    def sizeHint(self, which, constraint=QSizeF()):
-        if which == Qt.PreferredSize:
-            w, h = self._image.image.shape
-            # Take into account the constraint, keep aspect ratio, ...
-            return QSizeF(w, h)
-        else:
-            return super().sizeHint(which, constraint)
-
-    def setGeometry(self, geom):
-        super().setGeometry(geom)
-        geom = self.geometry()
-        self._image.setRect(self.contentsRect())
-
-    def changeEvent(self, event):
-        if event.type() == QEvent.ContentsRectChange:
-            self._image.setRect(self.contentsRect())
-        super().changeEvent(event)
 
 
 ##########################
@@ -574,8 +638,8 @@ def test():
     w = OWDistanceMap()
     w.show()
     w.raise_()
-#     data = Orange.data.Table("iris")
-    data = Orange.data.Table("housing")
+    data = Orange.data.Table("iris")
+#     data = Orange.data.Table("housing")
     dist = Orange.distance.Euclidean(data)
     w.set_distances(dist)
     w.handleNewSignals()

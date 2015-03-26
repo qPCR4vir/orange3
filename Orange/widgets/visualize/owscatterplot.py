@@ -1,9 +1,9 @@
 import sys
 
 import numpy as np
-from PyQt4.QtCore import QSize
+from PyQt4.QtCore import QSize, Qt
 from PyQt4 import QtGui
-from PyQt4.QtGui import QApplication, QColor
+from PyQt4.QtGui import QApplication
 
 import Orange
 from Orange.data import Table, Variable, DiscreteVariable
@@ -80,7 +80,6 @@ class OWScatterPlot(OWWidget):
         self.data = None  # Orange.data.Table
         self.subset_data = None  # Orange.data.Table
         self.attribute_selection_list = None  # list of Orange.data.Variable
-        self.selection_dirty = False
 
         common_options = {"labelWidth": 50, "orientation": "horizontal",
                           "sendSelectedValue": True, "valueType": str}
@@ -131,29 +130,52 @@ class OWScatterPlot(OWWidget):
         self.zoom_select_toolbar = g.zoom_select_toolbar(
             self.controlArea, nomargin=True,
             buttons=[g.StateButtonsBegin, g.SimpleSelect, g.Pan, g.Zoom,
-                     g.StateButtonsEnd, g.ZoomReset, g.Spacing, g.SendSelection]
+                     g.StateButtonsEnd, g.ZoomReset]
         )
         buttons = self.zoom_select_toolbar.buttons
-        buttons[g.SendSelection].clicked.connect(self.send_selection)
         buttons[g.Zoom].clicked.connect(self.graph.zoom_button_clicked)
         buttons[g.Pan].clicked.connect(self.graph.pan_button_clicked)
         buttons[g.SimpleSelect].clicked.connect(self.graph.select_button_clicked)
         buttons[g.ZoomReset].clicked.connect(self.graph.reset_button_clicked)
-        cb_auto_send = gui.checkBox(
-            box, self, 'auto_send_selection', 'Send selection on change')
-        gui.setStopper(self, buttons[g.SendSelection], cb_auto_send,
-                       "selection_dirty", self.send_selection)
         self.controlArea.layout().addStretch(100)
         self.icons = gui.attributeIconDict
 
         dlg = self.create_color_dialog()
         self.graph.continuous_palette = dlg.getContinuousPalette("contPalette")
         self.graph.discrete_palette = dlg.getDiscretePalette("discPalette")
+        dlg.deleteLater()
+
         p = self.graph.plot_widget.palette()
         self.graph.set_palette(p)
 
-        self.zoom_select_toolbar.buttons[OWPlotGUI.SendSelection].setEnabled(
-            not self.auto_send_selection)
+        gui.auto_commit(self.controlArea, self, "auto_send_selection",
+                        "Send Selection")
+
+        def zoom(s):
+            """Zoom in/out by factor `s`."""
+            viewbox = plot.getViewBox()
+            # scaleBy scales the view's bounds (the axis range)
+            viewbox.scaleBy((1 / s, 1 / s))
+
+        def fit_to_view():
+            viewbox = plot.getViewBox()
+            viewbox.autoRange()
+
+        zoom_in = QtGui.QAction(
+            "Zoom in", self, triggered=lambda: zoom(1.25)
+        )
+        zoom_in.setShortcuts([QtGui.QKeySequence(QtGui.QKeySequence.ZoomIn),
+                              QtGui.QKeySequence(self.tr("Ctrl+="))])
+        zoom_out = QtGui.QAction(
+            "Zoom out", self, shortcut=QtGui.QKeySequence.ZoomOut,
+            triggered=lambda: zoom(1 / 1.25)
+        )
+        zoom_fit = QtGui.QAction(
+            "Fit in view", self,
+            shortcut=QtGui.QKeySequence(Qt.ControlModifier | Qt.Key_0),
+            triggered=fit_to_view
+        )
+        self.addActions([zoom_in, zoom_out, zoom_fit])
 
         # self.vizrank = OWVizRank(self, self.signalManager, self.graph,
         #                          orngVizRank.SCATTERPLOT, "ScatterPlot")
@@ -208,7 +230,7 @@ class OWScatterPlot(OWWidget):
 
     # called when all signals are received, so the graph is updated only once
     def handleNewSignals(self):
-        self.graph.set_data(self.data, self.subset_data)
+        self.graph.new_data(self.data, self.subset_data)
         # self.vizrank.resetDialog()
         if self.attribute_selection_list and \
                 all(attr.name in self.graph.attribute_name_index
@@ -217,7 +239,7 @@ class OWScatterPlot(OWWidget):
             self.attr_y = self.attribute_selection_list[1].name
         self.attribute_selection_list = None
         self.update_graph()
-        self.send_selection()
+        self.unconditional_commit()
 
     def set_shown_attributes(self, attributes):
         if attributes and len(attributes) >= 2:
@@ -291,21 +313,11 @@ class OWScatterPlot(OWWidget):
     def saveSettings(self):
         OWWidget.saveSettings(self)
         # self.vizrank.saveSettings()
-    """
-    def auto_selection_changed(self):
-        self.zoom_select_toolbar.buttons[OWPlotGUI.SendSelection].setEnabled(
-            not self.auto_send_selection)
-        if self.auto_send_selection:
-            self.send_selection()
-    """
-    def selection_changed(self):
-        if self.auto_send_selection:
-            self.send_selection()
-        else:
-            self.selection_dirty = True
 
-    def send_selection(self):
-        self.selection_dirty = False
+    def selection_changed(self):
+        self.commit()
+
+    def commit(self):
         selected = unselected = None
         # TODO: Implement selection for sql data
         if isinstance(self.data, SqlTable):
@@ -360,16 +372,22 @@ class OWScatterPlot(OWWidget):
         self.reportSection("Graph")
         self.reportImage(self.graph.save_to_file, QSize(400, 400))
 
-#test widget appearance
-if __name__ == "__main__":
+
+def test_main():
+    import sip
     a = QApplication(sys.argv)
     ow = OWScatterPlot()
     ow.show()
     ow.raise_()
     data = Orange.data.Table(r"iris.tab")
     ow.set_data(data)
+    ow.set_subset_data(data[:30])
     #ow.setData(orange.ExampleTable("wine.tab"))
     ow.handleNewSignals()
     a.exec()
     #save settings
     ow.saveSettings()
+    sip.delete(ow)
+
+if __name__ == "__main__":
+    test_main()

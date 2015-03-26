@@ -18,7 +18,7 @@ from PyQt4.QtCore import Qt, QSize
 from PyQt4.QtCore import pyqtSignal as Signal, pyqtSlot as Slot
 
 import Orange.data
-import Orange.feature.transformation
+import Orange.preprocess.transformation
 
 from Orange.widgets import widget, gui, settings
 from Orange.widgets.utils import itemmodels
@@ -393,11 +393,8 @@ class OWEditDomain(widget.OWWidget):
         gui.button(box, self, "Reset selected", callback=self.reset_selected)
         gui.button(box, self, "Reset all", callback=self.reset_all)
 
-        box = gui.widgetBox(self.controlArea, "Commit")
-        cb = gui.checkBox(box, self, "autocommit", "Commit on any change")
-        b = gui.button(box, self, "Commit", callback=self.commit,
-                       default=True)
-        gui.setStopper(self, b, cb, "_invalidated", callback=self.commit)
+        gui.auto_commit(self.controlArea, self, "autocommit", "Commit",
+                        "Commit on change is on")
 
         box = gui.widgetBox(self.mainArea, "Edit")
         self.editor_stack = QtGui.QStackedWidget()
@@ -419,7 +416,7 @@ class OWEditDomain(widget.OWWidget):
             self.openContext(self.data)
             self._restore()
 
-        self.commit()
+        self.unconditional_commit()
 
     def clear(self):
         """Clear the widget state."""
@@ -428,7 +425,6 @@ class OWEditDomain(widget.OWWidget):
         self.input_vars = []
         self.domain_change_hints = {}
         self.selected_index = -1
-        self._invalidated = False
 
     def reset_selected(self):
         """Reset the currently selected variable to its original state."""
@@ -471,8 +467,8 @@ class OWEditDomain(widget.OWWidget):
                 newvar = variable_from_description(
                     self.domain_change_hints[vdesc]
                 )
-                newvar.get_value_from = \
-                    Orange.feature.transformation.Identity(var)
+                newvar.compute_value = \
+                    Orange.preprocess.transformation.Identity(var)
                 return newvar
             else:
                 return var
@@ -531,16 +527,13 @@ class OWEditDomain(widget.OWWidget):
                     variable_description(new_var)
 
         # Make orange's domain transformation work.
-        new_var.get_value_from = \
-            Orange.feature.transformation.Identity(old_var)
+        new_var.compute_value = \
+            Orange.preprocess.transformation.Identity(old_var)
 
         self._invalidate()
 
     def _invalidate(self):
-        """Invalidate the current output."""
-        self._invalidated = True
-        if self.autocommit:
-            self.commit()
+        self.commit()
 
     def commit(self):
         """Send the changed data to output."""
@@ -558,7 +551,6 @@ class OWEditDomain(widget.OWWidget):
             new_data = Orange.data.Table.from_table(new_domain, self.data)
 
         self.send("Data", new_data)
-        self._invalidated = False
 
 
 def main():

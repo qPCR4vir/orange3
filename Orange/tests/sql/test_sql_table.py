@@ -7,11 +7,9 @@ from Orange.data.sql import table as sql_table
 from Orange.data import filter, ContinuousVariable, DiscreteVariable, \
     StringVariable, Table, Domain
 from Orange.data.sql.table import SqlTable
-from Orange.tests.sql.base import PostgresTest, get_dburi, has_psycopg2, \
-    server_version
+from Orange.tests.sql.base import PostgresTest, sql_version, sql_test
 
-
-@unittest.skipIf(not has_psycopg2, "Psycopg2 is required for sql tests.")
+@sql_test
 class SqlTableTests(PostgresTest):
     def test_constructs_correct_attributes(self):
         data = list(zip(self.float_variable(21),
@@ -30,7 +28,6 @@ class SqlTableTests(PostgresTest):
 
             self.assertIsInstance(discrete_attr, DiscreteVariable)
             self.assertEqual(discrete_attr.name, "col1")
-            print(discrete_attr.to_sql())
             self.assertTrue('"col1"' in discrete_attr.to_sql())
             self.assertEqual(discrete_attr.values, ['f', 'm'])
 
@@ -396,7 +393,7 @@ class SqlTableTests(PostgresTest):
         sql_table = SqlTable(conn, table_name, inspect_values=True)
         self.assertFirstAttrIsInstance(sql_table, ContinuousVariable)
 
-    @unittest.skipIf(server_version() < 90200,
+    @unittest.skipIf(sql_version < 90200,
                      "Type not supported on this server version.")
     def test_smallserial(self):
         table = np.arange(25).reshape((-1, 1))
@@ -408,7 +405,7 @@ class SqlTableTests(PostgresTest):
         sql_table = SqlTable(conn, table_name, inspect_values=True)
         self.assertFirstAttrIsInstance(sql_table, ContinuousVariable)
 
-    @unittest.skipIf(server_version() < 90200,
+    @unittest.skipIf(sql_version < 90200,
                      "Type not supported on this server version.")
     def test_bigserial(self):
         table = np.arange(25).reshape((-1, 1))

@@ -342,7 +342,7 @@ class SqlTable(table.Table):
             self = self.sample_time(DEFAULT_SAMPLE_TIME)
 
         if columns is not None:
-            columns = [self.domain.var_from_domain(col) for col in columns]
+            columns = [self.domain[col] for col in columns]
         else:
             columns = list(self.domain)
             if include_metas:
@@ -375,7 +375,7 @@ class SqlTable(table.Table):
             self = self.sample_time(DEFAULT_SAMPLE_TIME)
 
         if columns is not None:
-            columns = [self.domain.var_from_domain(col) for col in columns]
+            columns = [self.domain[col] for col in columns]
         else:
             columns = list(self.domain)
         return self._get_distributions(columns)
@@ -656,7 +656,7 @@ class SqlRowInstance(instance.Instance):
     attributes.
     """
     def __init__(self, domain, data=None):
-        super().__init__(domain, data)
         nvar = len(domain.variables)
+        super().__init__(domain, data[:nvar])
         if len(data) > nvar:
             self._metas = data[nvar:]

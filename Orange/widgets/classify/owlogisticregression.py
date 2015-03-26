@@ -4,7 +4,7 @@ from PyQt4.QtCore import Qt
 
 import Orange.data
 from Orange.classification import logistic_regression as lr
-
+from Orange.preprocess.preprocess import Preprocess
 from Orange.widgets import widget, settings, gui
 
 
@@ -13,7 +13,8 @@ class OWLogisticRegression(widget.OWWidget):
     description = ""
     icon = "icons/LogisticRegression.svg"
 
-    inputs = [("Data", Orange.data.Table, "set_data")]
+    inputs = [("Data", Orange.data.Table, "set_data"),
+              ("Preprocessor", Preprocess, "set_preprocessor")]
     outputs = [("Learner", lr.LogisticRegressionLearner),
                ("Classifier", lr.LogisticRegressionClassifier)]
 
@@ -32,6 +33,7 @@ class OWLogisticRegression(widget.OWWidget):
         super().__init__(parent)
 
         self.data = None
+        self.preprocessors = None
 
         box = gui.widgetBox(self.controlArea, self.tr("Name"))
         gui.lineEdit(box, self, "learner_name")
@@ -67,13 +69,16 @@ class OWLogisticRegression(widget.OWWidget):
         self.apply()
 
     def set_data(self, data):
-
         self.data = data
-
         if data is not None:
-            self.data = data
-
             self.apply()
+
+    def set_preprocessor(self, preproc):
+        if preproc is None:
+            self.preprocessors = None
+        else:
+            self.preprocessors = (preproc,)
+        self.apply()
 
     def apply(self):
         penalty = ["l1", "l2"][self.penalty_type]
@@ -83,7 +88,8 @@ class OWLogisticRegression(widget.OWWidget):
             tol=self.tol,
             C=self.C,
             fit_intercept=self.fit_intercept,
-            intercept_scaling=self.intercept_scaling
+            intercept_scaling=self.intercept_scaling,
+            preprocessors=self.preprocessors
         )
         learner.name = self.learner_name
         classifier = None

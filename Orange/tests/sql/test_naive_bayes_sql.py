@@ -3,22 +3,22 @@ import unittest
 from numpy import array
 
 import Orange.classification.naive_bayes as nb
-from Orange.data.discretization import DiscretizeTable
+from Orange import preprocess
 from Orange.data.sql.table import SqlTable
 from Orange.data import Domain
 from Orange.data.variable import DiscreteVariable
-from Orange.tests.sql.base import has_psycopg2
+from Orange.tests.sql.base import sql_test
 
 
-@unittest.skipIf(not has_psycopg2, "Psycopg2 is required for sql tests.")
+@sql_test
 class NaiveBayesTest(unittest.TestCase):
     def test_NaiveBayes(self):
         table = SqlTable(dict(host='localhost', database='test'), 'iris',
-                         type_hints=Domain([], DiscreteVariable("iris", 
+                         type_hints=Domain([], DiscreteVariable("iris",
                                 values=['Iris-setosa', 'Iris-virginica',
                                         'Iris-versicolor'])))
-        table = DiscretizeTable(table)
-        bayes = nb.BayesLearner()
+        table = preprocess.Discretize(table)
+        bayes = nb.NaiveBayesLearner()
         clf = bayes(table)
         # Single instance prediction
         self.assertEqual(clf(table[0]), table[0].get_class())

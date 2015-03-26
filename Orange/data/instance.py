@@ -1,4 +1,5 @@
-from numbers import Real
+from itertools import chain
+from numbers import Real, Integral
 from ..data.value import Value, Unknown
 from math import isnan
 import numpy as np
@@ -14,82 +15,86 @@ class Instance:
         :param data: instance's values
         :type data: Orange.data.Instance or a sequence of values
         """
-        self._domain = domain
-        self.sparse_x = self.sparse_y = self.sparse_metas = None
+        if data is None and isinstance(domain, Instance):
+            data = domain
+            domain = data.domain
 
+        self._domain = domain
         if data is None:
-            if isinstance(domain, Instance):
-                data = domain
-                self._domain = domain = domain.domain
-            else:
-                self._values = np.repeat(Unknown, len(domain.variables))
-                self._x = self._values[:len(domain.attributes)]
-                self._y = self._values[len(domain.attributes):]
-                self._metas = np.array(
-                    [Unknown if var.is_primitive else None for var in
-                     domain.metas],
-                    dtype=object)
-                self._weight = 1
-                return
-        if isinstance(data, Instance) and data.domain == domain:
-            self._values = np.array(data._values)
+            self._x = np.repeat(Unknown, len(domain.attributes))
+            self._y = np.repeat(Unknown, len(domain.class_vars))
+            self._metas = np.array([var.Unknown for var in domain.metas],
+                                   dtype=object)
+            self._weight = 1
+        elif isinstance(data, Instance) and data.domain == domain:
+            self._x = np.array(data._x)
+            self._y = np.array(data._y)
             self._metas = np.array(data._metas)
             self._weight = data._weight
         else:
-            self._values, self._metas = domain.convert(data)
+            self._x, self._y, self._metas = domain.convert(data)
             self._weight = 1
-        self._x = self._values[:len(domain.attributes)]
-        self._y = self._values[len(domain.attributes):]
 
     @property
     def domain(self):
         """The domain describing the instance's values."""
         return self._domain
 
-
     @property
     def x(self):
         """
         Instance's attributes as a 1-dimensional numpy array whose length
-        equals len(self.domain.attributes)
+        equals `len(self.domain.attributes)`.
         """
         return self._x
-
 
     @property
     def y(self):
         """
         Instance's classes as a 1-dimensional numpy array whose length
-        equals len(self.domain.attributes)
+        equals `len(self.domain.attributes)`.
         """
         return self._y
-
 
     @property
     def metas(self):
         """
         Instance's meta attributes as a 1-dimensional numpy array whose length
-        equals len(self.domain.attributes)
+        equals `len(self.domain.attributes)`.
         """
         return self._metas
-
 
     @property
     def weight(self):
         """The weight of the data instance. Default is 1."""
         return self._weight
 
-
     @weight.setter
     def weight(self, weight):
         self._weight = weight
 
+    def __setitem__(self, key, value):
+        if not isinstance(key, Integral):
+            key = self._domain.index(key)
+        value = self._domain[key].to_val(value)
+        if key >= 0 and not isinstance(value, (int, float)):
+            raise TypeError("Expected primitive value, got '%s'" %
+                            type(value).__name__)
+
+        if 0 <= key < len(self._domain.attributes):
+            self._x[key] = value
+        elif len(self._domain.attributes) <= key:
+            self._y[key - len(self.domain.attributes)] = value
+        else:
+            self._metas[-1 - key] = value
 
     def __getitem__(self, key):
-        if not isinstance(key, int):
+        if not isinstance(key, Integral):
             key = self._domain.index(key)
-        if key >= 0:
-            value = self._values[key]
+        if 0 <= key < len(self._domain.attributes):
+            value = self._x[key]
+        elif key >= len(self._domain.attributes):
+            value = self._y[key - len(self.domain.attributes)]
         else:
             value = self._metas[-1 - key]
         return Value(self._domain[key], value)
@@ -102,68 +107,67 @@ class Instance:
     #     Same in Table.__getitem__
 
     @staticmethod
-    def str_values(data, variables):
-        s = ", ".join(var.str_val(val)
-            for var, val in zip(variables, data[:5]))
-        if len(data) > 5:
-            s += ", ..."
+    def str_values(data, variables, limit=True):
+        if limit:
+            s = ", ".join(var.str_val(val)
+                for var, val in zip(variables, data[:5]))
+            if len(data) > 5:
+                s += ", ..."
+            return s
+        else:
+            return ", ".join(var.str_val(val)
+                             for var, val in zip(variables, data))
+
+    def _str(self, limit):
+        s = "[" + self.str_values(self._x, self._domain.attributes, limit)
+        if self._domain.class_vars:
+            s += " | " + \
+                 self.str_values(self._y, self._domain.class_vars, limit)
+        s += "]"
+        if self._domain.metas:
+            s += " {" + \
+                 self.str_values(self._metas, self._domain.metas, limit) + \
+                 "}"
         return s
 
     def __str__(self):
-        s = "[" + self.str_values(self._x, self._domain.attributes)
-        if self._domain.class_vars:
-            s += " | " + self.str_values(self._y, self._domain.class_vars)
-        s += "]"
-        if self._domain.metas:
-            s += " {" + self.str_values(self._metas, self._domain.metas) + "}"
-        return s
+        return self._str(False)
 
-    __repr__ = __str__
-
-
-    def __setitem__(self, key, value):
-        if not isinstance(key, int):
-            key = self._domain.index(key)
-        if key >= 0:
-            if not isinstance(value, float):
-                raise TypeError("Expected primitive value, got '%s'" %
-                                type(value).__name__)
-            self._values[key] = value
-        else:
-            self._metas[-1 - key] = value
-
+    def __repr__(self):
+        return self._str(True)
 
     def __eq__(self, other):
-        # TODO: rewrite to Cython
         if not isinstance(other, Instance):
             other = Instance(self._domain, other)
-        for v1, v2 in zip(self._values, other._values):
-            if not (isnan(v1) or isnan(v2) or v1 == v2):
-                return False
-        for m1, m2 in zip(self._metas, other._metas):
-            if not (m1 == m2
-                    or (isinstance(m1, float) and isnan(m1)) or m1 is None
-                    or (isinstance(m2, float) and isnan(m2)) or m2 is None):
-                return False
-        return True
 
+        def same(x1, x2):
+            nan1 = np.isnan(x1)
+            nan2 = np.isnan(x2)
+            return np.array_equal(nan1, nan2) and \
+                np.array_equal(x1[~nan1], x2[~nan2])
+
+        return same(self._x, other._x) and same(self._y, other._y) \
+            and all(m1 == m2 or
+                    type(m1) == type(m2) == float and isnan(m1) and isnan(m2)
+                    for m1, m2 in zip(self._metas, other._metas))
 
     def __iter__(self):
-        return iter(self._values)
+        return chain(iter(self._x), iter(self._y))
+
+    def values(self):
+        return (Value(var, val)
+                for var, val in zip(self.domain.variables, self))
 
     def __len__(self):
-        return len(self._values)
-
+        return len(self._x) + len(self._y)
 
     def attributes(self):
         """Return iterator over the instance's attributes"""
-        return iter(self._values[:len(self._domain.attributes)])
-
+        return iter(self._x)
 
     def classes(self):
         """Return iterator over the instance's class attributes"""
         return iter(self._y)
-
 
     # A helper function for get_class and set_class
     def _check_single_class(self):
@@ -171,7 +175,6 @@ class Instance:
             raise TypeError("Domain has no class variable")
         elif len(self._domain.class_vars) > 1:
             raise TypeError("Domain has multiple class variables")
-
 
     def get_class(self):
         """
@@ -181,15 +184,13 @@ class Instance:
         self._check_single_class()
         return Value(self._domain.class_var, self._y[0])
 
-
     def get_classes(self):
         """
         Return the class value as a list of instances of
         :obj:`Orange.data.Value`.
         """
         return (Value(var, value)
-            for var, value in zip(self._domain.class_vars, self._y))
-
+                for var, value in zip(self._domain.class_vars, self._y))
 
     def set_class(self, value):
         """
@@ -201,4 +202,3 @@ class Instance:
             self._y[0] = self._domain.class_var.to_val(value)
         else:
             self._y[0] = value
-        self._values[len(self._domain.attributes)] = self._y[0]
