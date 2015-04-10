@@ -9,7 +9,7 @@ from Orange.data import filter
 from Orange.data import Unknown
 
 import numpy as np
-from mock import Mock, MagicMock, patch
+from unittest.mock import Mock, MagicMock, patch
 
 
 class TableTestCase(unittest.TestCase):
@@ -688,6 +688,17 @@ class TableTestCase(unittest.TestCase):
         finally:
             os.remove("test-zoo.tab")
 
+    def test_save_pickle(self):
+        table = data.Table("iris")
+        try:
+            table.save("iris.pickle")
+            table2 = data.Table.from_file("iris.pickle")
+            np.testing.assert_almost_equal(table.X, table2.X)
+            np.testing.assert_almost_equal(table.Y, table2.Y)
+            self.assertIs(table.domain[0], table2.domain[0])
+        finally:
+            os.remove("iris.pickle")
+
     def test_from_numpy(self):
         import random
 
@@ -1095,7 +1106,7 @@ class CreateTableWithFilename(TableTests):
     filename = "data.tab"
 
     @patch("os.path.exists", Mock(return_value=True))
-    @patch("Orange.data.io.TabDelimReader")
+    @patch("Orange.data.io.TabDelimFormat")
     def test_read_data_calls_reader(self, reader_mock):
         table_mock = Mock(data.Table)
         reader_instance = reader_mock.return_value = \
@@ -1107,13 +1118,13 @@ class CreateTableWithFilename(TableTests):
         self.assertEqual(table, table_mock)
 
     @patch("os.path.exists", Mock(return_value=True))
-    @patch("Orange.data.io.ExcelReader")
-    def test_read_data_calls_reader(self, reader_mock):
+    def test_read_data_calls_reader(self):
         table_mock = Mock(data.Table)
-        reader_instance = reader_mock.return_value = \
-            Mock(read_file=Mock(return_value=table_mock))
+        reader_instance = Mock(read_file=Mock(return_value=table_mock))
 
-        table = data.Table.from_file("test.xlsx")
+        with patch.dict(data.io.FileFormats.readers,
+                        {'.xlsx': lambda: reader_instance}):
+            table = data.Table.from_file("test.xlsx")
 
         reader_instance.read_file.assert_called_with("test.xlsx", data.Table)
         self.assertEqual(table, table_mock)
@@ -1219,6 +1230,33 @@ class CreateTableWithData(TableTests):
         table = data.Table(tuple(self.data))
         self.assertIsInstance(table.domain, data.Domain)
         np.testing.assert_almost_equal(table.X, self.data)
+
+    def test_creates_a_table_from_domain_and_list(self):
+        domain = data.Domain([data.DiscreteVariable(name="a", values="mf"),
+                              data.ContinuousVariable(name="b")],
+                             data.DiscreteVariable(name="y", values="abc"))
+        table = data.Table(domain, [[0, 1, 2],
+                                    [1, 2, "?"],
+                                    ["m", 3, "a"],
+                                    ["?", "?", "c"]])
+        self.assertIs(table.domain, domain)
+        np.testing.assert_almost_equal(
+            table.X, np.array([[0, 1], [1, 2], [0, 3], [np.nan, np.nan]]))
+        np.testing.assert_almost_equal(table.Y, np.array([2, np.nan, 0, 2]))
+
+    def test_creates_a_table_from_domain_and_list_and_weights(self):
+        domain = data.Domain([data.DiscreteVariable(name="a", values="mf"),
+                              data.ContinuousVariable(name="b")],
+                             data.DiscreteVariable(name="y", values="abc"))
+        table = data.Table(domain, [[0, 1, 2],
+                                    [1, 2, "?"],
+                                    ["m", 3, "a"],
+                                    ["?", "?", "c"]], [1, 2, 3, 4])
+        self.assertIs(table.domain, domain)
+        np.testing.assert_almost_equal(
+            table.X, np.array([[0, 1], [1, 2], [0, 3], [np.nan, np.nan]]))
+        np.testing.assert_almost_equal(table.Y, np.array([2, np.nan, 0, 2]))
+        np.testing.assert_almost_equal(table.W, np.array([1, 2, 3, 4]))
 
     def test_creates_a_table_with_domain_and_given_X(self):
         domain = self.mock_domain()
@@ -1471,6 +1509,28 @@ class CreateTableWithDomainAndTable(TableTests):
         self.assert_table_with_filter_matches(
             new_table, self.table, xcols=order, ycols=order, mcols=order)
 
+    def test_creates_table_with_given_domain_and_row_filter(self):
+        a, c, m = column_sizes(self.table)
+        order = ([random.randrange(a) for _ in self.domain.attributes] +
+                 [random.randrange(a, a + c) for _ in self.domain.class_vars] +
+                 [random.randrange(-m + 1, 0) for _ in self.domain.metas])
+        random.shuffle(order)
+        vars = list(self.domain.variables) + list(self.domain.metas[::-1])
+        vars = [vars[i] for i in order]
+
+        new_domain = self.create_domain(vars, vars, vars)
+        new_table = data.Table.from_table(new_domain, self.table, [0])
+        self.assert_table_with_filter_matches(
+            new_table, self.table[:1], xcols=order, ycols=order, mcols=order)
+
+        new_table = data.Table.from_table(new_domain, self.table, [2, 1, 0])
+        self.assert_table_with_filter_matches(
+            new_table, self.table[2::-1], xcols=order, ycols=order, mcols=order)
+
+        new_table = data.Table.from_table(new_domain, self.table, [])
+        self.assert_table_with_filter_matches(
+            new_table, self.table[:0], xcols=order, ycols=order, mcols=order)
+
     def assert_table_with_filter_matches(
             self, new_table, old_table,
             rows=..., xcols=..., ycols=..., mcols=...):
@@ -1491,7 +1551,7 @@ class CreateTableWithDomainAndTable(TableTests):
             Y = Y.flatten()
         np.testing.assert_almost_equal(new_table.Y, Y)
         np.testing.assert_almost_equal(new_table.metas, magic[rows, mcols])
-        np.testing.assert_almost_equal(new_table.W, self.table.W[rows])
+        np.testing.assert_almost_equal(new_table.W, old_table.W[rows])
 
 
 def isspecial(s):

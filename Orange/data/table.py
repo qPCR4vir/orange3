@@ -190,7 +190,9 @@ class Table(MutableSequence, Storage):
             if not args:
                 return cls.from_domain(domain, **kwargs)
             if isinstance(args[0], Table):
-                return cls.from_table(domain, args[0])
+                return cls.from_table(domain, *args)
+            elif isinstance(args[0], list):
+                return cls.from_list(domain, *args)
         else:
             domain = None
 
@@ -253,13 +255,14 @@ class Table(MutableSequence, Storage):
             n_src_attrs = len(source.domain.attributes)
             if all(isinstance(x, Integral) and 0 <= x < n_src_attrs
                    for x in src_cols):
-                return source.X[row_indices, src_cols]
+                return _subarray(source.X, row_indices, src_cols)
             if all(isinstance(x, Integral) and x < 0 for x in src_cols):
-                return source.metas[row_indices, [-1 - x for x in src_cols]]
+                return _subarray(source.metas, row_indices,
+                                 [-1 - x for x in src_cols])
             if all(isinstance(x, Integral) and x >= n_src_attrs
                    for x in src_cols):
-                return source._Y[row_indices, [x - n_src_attrs for x in
-                                              src_cols]]
+                return _subarray(source._Y, row_indices,
+                                 [x - n_src_attrs for x in src_cols])
 
             types = []
             if any(isinstance(x, Integral) and 0 <= x < n_src_attrs
@@ -276,7 +279,10 @@ class Table(MutableSequence, Storage):
                 if col is None:
                     a[:, i] = Unknown
                 elif not isinstance(col, Integral):
-                    a[:, i] = col(source)
+                    if row_indices is not ...:
+                        a[:, i] = col(source)[row_indices]
+                    else:
+                        a[:, i] = col(source)
                 elif col < 0:
                     a[:, i] = source.metas[row_indices, -1 - col]
                 elif col < n_src_attrs:
@@ -422,11 +428,29 @@ class Table(MutableSequence, Storage):
         return self
 
     @classmethod
+    def from_list(cls, domain, rows, weights=None):
+        if weights is not None and len(rows) != len(weights):
+            raise ValueError("mismatching number of instances and weights")
+        self = cls.from_domain(domain, len(rows), weights is not None)
+        attrs, classes = domain.attributes, domain.class_vars
+        nattrs = len(domain.attributes)
+        for i, row in enumerate(rows):
+            for j, (var, val) in enumerate(zip(attrs, row)):
+                self.X[i, j] = var.to_val(val)
+            for j, (var, val) in enumerate(zip(classes, row[nattrs:])):
+                self._Y[i, j] = var.to_val(val)
+        self.W = np.array(weights)
+        return self
+
+    @classmethod
     def _init_ids(cls, obj):
         with cls._next_instance_lock:
             obj.ids = np.array(range(cls._next_instance_id, cls._next_instance_id + obj.X.shape[0]))
             cls._next_instance_id += obj.X.shape[0]
 
+    FILE_FORMATS = {
+        ".tab": (io.TabDelimFormat, )
+    }
     def save(self, filename):
         """
         Save a data table to a file. The path can be absolute or relative.
@@ -435,10 +459,15 @@ class Table(MutableSequence, Storage):
         :type filename: str
         """
         ext = os.path.splitext(filename)[1]
-        if ext == ".tab":
-            io.save_tab_delimited(filename, self)
-        else:
-            raise IOError("Unknown file name extension.")
+        writer = io.FileFormats.writers.get(ext)
+        if not writer:
+            desc = io.FileFormats.names.get(ext)
+            if desc:
+                raise IOError("Writing of {}s is not supported".
+                              format(desc.lower()))
+            else:
+                raise IOError("Unknown file name extension.")
+        writer().write_file(filename, self)
 
     @classmethod
     def from_file(cls, filename):
@@ -454,7 +483,7 @@ class Table(MutableSequence, Storage):
             ext = os.path.splitext(filename)[1]
             absolute_filename = os.path.join(dir, filename)
             if not ext:
-                for ext in [".tab", ".txt", ".basket", ".xlsx"]:
+                for ext in io.FileFormats.readers:
                     if os.path.exists(absolute_filename + ext):
                         absolute_filename += ext
                         break
@@ -465,18 +494,15 @@ class Table(MutableSequence, Storage):
 
         if not os.path.exists(absolute_filename):
             raise IOError('File "{}" was not found.'.format(filename))
-        if ext == ".tab":
-            data = io.TabDelimReader().read_file(absolute_filename, cls)
-        elif ext == ".txt":
-            data = io.TxtReader().read_file(absolute_filename, cls)
-        elif ext == ".xlsx":
-            data = io.ExcelReader().read_file(absolute_filename, cls)
-        elif ext == ".basket":
-            data = io.BasketReader().read_file(absolute_filename, cls)
-        else:
-            raise IOError(
-                'Extension "{}" is not recognized'.format(ext))
-
+        reader = io.FileFormats.readers.get(ext)
+        if not reader:
+            desc = io.FileFormats.names.get(ext)
+            if desc:
+                raise IOError("Reading {}s is not supported".
+                              format(desc.lower()))
+            else:
+                raise IOError("Unknown file name extension.")
+        data = reader().read_file(absolute_filename, cls)
         data.name = os.path.splitext(os.path.split(filename)[-1])[0]
         # no need to call _init_ids as fuctions from .io already
         # construct a table with .ids
@@ -1320,3 +1346,51 @@ def _check_arrays(*arrays, dtype=None):
 def _check_inf(array):
     return array.dtype.char in np.typecodes['AllFloat'] and \
             np.isinf(array.data).any()
+
+
+def _subarray(arr, rows, cols):
+    return arr[_rxc_ix(rows, cols)]
+
+
+def _rxc_ix(rows, cols):
+    """
+    Construct an index object to index the `rows` x `cols` cross product.
+
+    Rows and columns can be a 1d bool or int sequence, a slice or an
+    Ellipsis (`...`). The later is a convenience and is interpreted the same
+    as `slice(None, None, -1)`
+
+    Parameters
+    ----------
+    rows : 1D sequence, slice or Ellipsis
+        Row indices.
+    cols : 1D sequence, slice or Ellipsis
+        Column indices.
+
+    See Also
+    --------
+    numpy.ix_
+
+    Examples
+    --------
+    >>> a = np.arange(10).reshape(2, 5)
+    >>> a[_rxc_ix([0, 1], [3, 4])]
+    array([[3, 4],
+           [8, 9]])
+    >>> a[_rxc_ix([False, True], ...)]
+    array([[5, 6, 7, 8, 9]])
+
+    """
+    rows = slice(None, None, 1) if rows is ... else rows
+    cols = slice(None, None, 1) if cols is ... else cols
+
+    isslice = (isinstance(rows, slice), isinstance(cols, slice))
+    if isslice == (True, True):
+        return rows, cols
+    elif isslice == (True, False):
+        return rows, np.asarray(np.ix_(cols), int).ravel()
+    elif isslice == (False, True):
+        return np.asarray(np.ix_(rows), int).ravel(), cols
+    else:
+        r, c = np.ix_(rows, cols)
+        return np.asarray(r, int), np.asarray(c, int)

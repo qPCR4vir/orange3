@@ -4,7 +4,8 @@
 # Required definitions need to be passed to the makensis call
 #  - BASEDIR base location of all required binaries, ... (see below)
 #  - PYTHON_VERSION (major.minor.micro) python version e.g 3.4.2
-#  - PYVER short (major.minor) python version e.g 3.4
+#  - PYTHON_VERSION_SHORT (major.minor) python version e.g 3.4
+#  - PYVER short (majorminor) python version e.g 34
 #  - ARCH python architecture identifier (win32 or amd64)
 
 # Required data layout at compile time
@@ -16,7 +17,6 @@
 #     msvredist/
 #   wheelhouse/
 #       [sse-flags]/
-#   pyqt4/
 #   requirements.txt
 
 Name "Orange3"
@@ -32,7 +32,6 @@ OutFile ${OUTFILENAME}
 #
 # Temporary folder where temp data is extracted
 #
-#!define TEMPDIR "C:\Temp\orange"
 !define TEMPDIR $TEMP\orange-installer
 
 !include "LogicLib.nsh"
@@ -61,7 +60,7 @@ Section ""
 		askpython:
 
 		MessageBox MB_OKCANCEL \
-			"Orange installer will first launch installation of Python ${PYVER}." \
+			"Orange installer will first launch installation of Python ${PYTHON_VERSION}." \
 			/SD IDOK \
 			IDOK installpython \
 			IDCANCEL askpythonretry
@@ -75,10 +74,10 @@ Section ""
 		installpython:
 
 		DetailPrint "Extracting installers"
-		${ExtractTemp} "${BASEDIR}\core\python\python-${PYTHON_VERSION}.msi" ${TEMPDIR}\core\python
+		${ExtractTemp} "${BASEDIR}\core\python\python-${PYTHON_VERSION}.msi" "${TEMPDIR}\core\python"
 
 		DetailPrint "Installing Python"
-		${InstallPython} ${TEMPDIR}\core\python\python-${PYTHON_VERSION}.msi
+		${InstallPython} "${TEMPDIR}\core\python\python-${PYTHON_VERSION}.msi"
 
 		# Get the location of the interpreter from registry
 		${InitPythonDir}
@@ -165,6 +164,10 @@ Section ""
 				"Software\Microsoft\Windows\CurrentVersion\Uninstall\Orange3" \
 				"UninstallString" '$PythonDir\share\Orange\canvas\uninst.exe'
 
+	WriteRegStr SHELL_CONTEXT \
+				"Software\OrangeCanvas\Current" "PythonDir" \
+				"$PythonDir"
+
 	WriteRegStr HKEY_CLASSES_ROOT ".ows" "" "OrangeCanvas"
 	WriteRegStr HKEY_CLASSES_ROOT "OrangeCanvas\DefaultIcon" "" "$PythonDir\share\Orange\canvas\icons\OrangeOWS.ico"
 	WriteRegStr HKEY_CLASSES_ROOT "OrangeCanvas\Shell\Open\Command\" "" '$PythonDir\python.exe -m Orange.canvas "%1"'
@@ -180,17 +183,17 @@ SectionEnd
 Section Uninstall
 	MessageBox MB_YESNO "Are you sure you want to remove Orange?" /SD IDYES IDNO abort
 
-	ReadRegStr $PythonDir HKLM Software\Python\PythonCore\${PYVER}\InstallPath ""
-
-	${PythonExec} "-m pip uninstall -y Orange"
-
-	RmDir /R $PythonDir\share\Orange
-
 	${If} $AdminInstall = 0
 	    SetShellVarContext all
 	${Else}
 	    SetShellVarContext current
-	${Endif}
+	${EndIf}
+
+	ReadRegStr $PythonDir SHELL_CONTEXT Software\OrangeCanvas\Current "PythonDir"
+
+	${PythonExec} "-m pip uninstall -y Orange"
+
+	RmDir /R $PythonDir\share\Orange
 
 	RmDir /R "$SMPROGRAMS\Orange3"
 
