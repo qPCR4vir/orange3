@@ -153,6 +153,7 @@ class OWSql(widget.OWWidget):
                         AND n.nspname <> 'information_schema'
                         AND n.nspname !~ '^pg_toast'
                         AND pg_catalog.pg_table_is_visible(c.oid)
+                        AND NOT c.relname LIKE '\\_\\_%'
                    ORDER BY 1;""")
 
         self.tablecombo.addItem("Select a table")

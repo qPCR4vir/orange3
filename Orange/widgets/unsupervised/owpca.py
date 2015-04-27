@@ -1,13 +1,19 @@
-
-from PyQt4.QtGui import QFormLayout, QColor, QApplication
-from PyQt4.QtCore import Qt
+from PyQt4.QtGui import QFormLayout, QColor, QApplication, QLineEdit
+from PyQt4.QtCore import Qt, QTimer
 
 import numpy
 import pyqtgraph as pg
 
 import Orange.data
+from Orange.data.sql.table import SqlTable
 import Orange.projection
 from Orange.widgets import widget, gui, settings
+
+try:
+    from orangecontrib import remote
+    remotely = True
+except ImportError:
+    remotely = False
 
 
 class OWPCA(widget.OWWidget):
@@ -19,8 +25,11 @@ class OWPCA(widget.OWWidget):
     inputs = [("Data", Orange.data.Table, "set_data")]
     outputs = [("Transformed data", Orange.data.Table),
                ("Components", Orange.data.Table)]
-    ncomponents = settings.Setting(0)
+    ncomponents = settings.Setting(2)
     variance_covered = settings.Setting(100)
+    batch_size = settings.Setting(100)
+    address = settings.Setting('localhost:9465')
+    auto_update = settings.Setting(True)
     auto_commit = settings.Setting(True)
 
     def __init__(self, parent=None):
@@ -54,6 +63,34 @@ class OWPCA(widget.OWWidget):
         form.addRow("Components", self.components_spin)
         form.addRow("Variance covered", self.variance_spin)
 
+        self.sampling_box = gui.widgetBox(self.controlArea,
+                                          "Incremental learning")
+
+        self.addresstext = QLineEdit(box)
+        self.addresstext.setPlaceholderText('Remote server')
+        if self.address:
+            self.addresstext.setText(self.address)
+        self.sampling_box.layout().addWidget(self.addresstext)
+
+        form = QFormLayout()
+        self.sampling_box.layout().addLayout(form)
+        self.batch_spin = gui.spin(
+            self.sampling_box, self, "batch_size", 50, 100000, step=50,
+            keyboardTracking=False)
+        form.addRow("Batch size ~ ", self.batch_spin)
+
+        self.start_button = gui.button(
+            self.sampling_box, self, "Start remote computation",
+            callback=self.start, autoDefault=False,
+            tooltip="Start/abort computation on the server")
+        self.start_button.setEnabled(False)
+
+        gui.checkBox(self.sampling_box, self, "auto_update",
+                     "Periodically fetch model", callback=self.update_model)
+        self.__timer = QTimer(self, interval=2000)
+        self.__timer.timeout.connect(self.get_model)
+
+        self.sampling_box.setVisible(remotely)
         self.controlArea.layout().addStretch()
 
         gui.auto_commit(self.controlArea, self, "auto_commit", "Send data",
@@ -73,25 +110,53 @@ class OWPCA(widget.OWWidget):
 
         self.mainArea.layout().addWidget(self.plot)
 
+    def update_model(self):
+        self.get_model()
+        if self.auto_update and self.rpca and not self.rpca.ready():
+            self.__timer.start(2000)
+        else:
+            self.__timer.stop()
+
+    def start(self):
+        if 'Abort' in self.start_button.text():
+            self.rpca.abort()
+            self.__timer.stop()
+            self.start_button.setText("Start remote computation")
+        else:
+            self.address = self.addresstext.text()
+            with remote.server(self.address):
+                from Orange.projection.pca import RemotePCA
+                maxiter = (1e5 + self.data.approx_len()) / self.batch_size * 3
+                self.rpca = RemotePCA(self.data, self.address,
+                                      self.batch_size, int(maxiter))
+            self.update_model()
+            self.start_button.setText("Abort remote computation")
+
     def set_data(self, data):
         self.clear()
         self.data = data
 
+        self.start_button.setEnabled(False)
         if data is not None:
             self._transformed = None
+            if remotely and isinstance(data, SqlTable):
+                self.sampling_box.setVisible(True)
+                self.start_button.setText("Start remote computation")
+                self.start_button.setEnabled(True)
+            else:
+                self.sampling_box.setVisible(False)
+                pca = Orange.projection.PCA()
+                pca = pca(self.data)
+                variance_ratio = pca.explained_variance_ratio_
+                cumulative = numpy.cumsum(variance_ratio)
+                self.components_spin.setRange(0, len(cumulative))
 
-            pca = Orange.projection.PCA()
-            pca = pca(self.data)
-            variance_ratio = pca.explained_variance_ratio_
-            cumulative = numpy.cumsum(variance_ratio)
-            self.components_spin.setRange(0, len(cumulative))
+                self._pca = pca
+                self._variance_ratio = variance_ratio
+                self._cumulative = cumulative
+                self._setup_plot()
 
-            self._pca = pca
-            self._variance_ratio = variance_ratio
-            self._cumulative = cumulative
-            self._setup_plot()
-
-        self.unconditional_commit()
+                self.unconditional_commit()
 
     def clear(self):
         self.data = None
@@ -101,6 +166,22 @@ class OWPCA(widget.OWWidget):
         self._cumulative = None
         self._line = None
         self.plot.clear()
+
+    def get_model(self):
+        if self.rpca is None:
+            return
+        if self.rpca.ready():
+            self.__timer.stop()
+            self.start_button.setText("Restart (finished)")
+        self._pca = self.rpca.get_state()
+        if self._pca is None:
+            return
+        self._variance_ratio = self._pca.explained_variance_ratio_
+        self._cumulative = numpy.cumsum(self._variance_ratio)
+        self.plot.clear()
+        self._setup_plot()
+        self._transformed = None
+        self.commit()
 
     def _setup_plot(self):
         explained_ratio = self._variance_ratio
@@ -167,12 +248,11 @@ class OWPCA(widget.OWWidget):
         if self._pca is None:
             return
 
-        cut = numpy.searchsorted(self._cumulative, self.variance_covered / 100.0)
-        self.ncomponents = cut
-
+        cut = numpy.searchsorted(self._cumulative,
+                                 self.variance_covered / 100.0)
+        self.ncomponents = cut + 1
         if numpy.floor(self._line.value()) + 1 != cut:
             self._line.setValue(cut - 1)
-
         self._invalidate_selection()
 
     def _nselected_components(self):
@@ -191,10 +271,8 @@ class OWPCA(widget.OWWidget):
             cut = max_comp
             self.variance_covered = var_max * 100
         else:
-            cut = numpy.searchsorted(
-                self._cumulative, self.variance_covered / 100.0
-            )
-            self.ncomponents = cut
+            self.ncomponents = cut = numpy.searchsorted(
+                self._cumulative, self.variance_covered / 100.0) + 1
         return cut
 
     def _invalidate_selection(self):
@@ -206,20 +284,17 @@ class OWPCA(widget.OWWidget):
             components = self._pca.components_
             if self._transformed is None:
                 # Compute the full transform (all components) only once.
-                transformed = self._transformed = self._pca(self.data)
-            else:
-                transformed = self._transformed
+                self._transformed = self._pca(self.data)
+            transformed = self._transformed
 
             domain = Orange.data.Domain(
                 transformed.domain.attributes[:self.ncomponents],
                 self.data.domain.class_vars,
                 self.data.domain.metas
             )
-            transformed = Orange.data.Table.from_numpy(
-                domain, transformed.X[:, :self.ncomponents], Y=transformed.Y,
-                metas=transformed.metas, W=transformed.W
-            )
+            transformed = transformed.from_table(domain, transformed)
             components = Orange.data.Table.from_numpy(None, components)
+            components.name = 'components'
 
         self.send("Transformed data", transformed)
         self.send("Components", components)
