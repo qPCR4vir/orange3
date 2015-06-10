@@ -3,13 +3,20 @@ import sys
 
 import numpy as np
 import sklearn.metrics as skl_metrics
-from Orange.data import DiscreteVariable
+from Orange.misc.wrapper_meta import WrapperMeta
 
 __all__ = ["CA", "Precision", "Recall", "F1", "PrecisionRecallFSupport", "AUC",
-           "MSE", "RMSE", "MAE", "R2", "compute_CD", "graph_ranks"]
+           "MSE", "RMSE", "MAE", "R2", "compute_CD", "graph_ranks", "LogLoss"]
 
 
-class Score:
+class Score(metaclass=WrapperMeta):
+    """
+    ${sklpar}
+    Parameters
+    ----------
+    results : Orange.evaluation.Results
+        Stored predictions and actual data in model testing.
+    """
     separate_folds = False
     is_scalar = True
 
@@ -49,9 +56,9 @@ class Score:
         return NotImplementedError
 
     @staticmethod
-    def from_predicted(results, score_function):
+    def from_predicted(results, score_function, **kwargs):
         return np.fromiter(
-            (score_function(results.actual, predicted)
+            (score_function(results.actual, predicted, **kwargs)
              for predicted in results.predicted),
             dtype=np.float64, count=len(results.predicted))
 
@@ -59,26 +66,63 @@ class Score:
 ## Classification scores
 
 class CA(Score):
+    __wraps__ = skl_metrics.accuracy_score
+
     def compute_score(self, results):
         return self.from_predicted(results, skl_metrics.accuracy_score)
 
 
 class Precision(Score):
+    __wraps__ = skl_metrics.precision_score
+
     def compute_score(self, results):
         return self.from_predicted(results, skl_metrics.precision_score)
 
 
 class Recall(Score):
+    __wraps__ = skl_metrics.recall_score
+
     def compute_score(self, results):
         return self.from_predicted(results, skl_metrics.recall_score)
 
 
 class F1(Score):
-    def compute_score(self, results):
-        return self.from_predicted(results, skl_metrics.f1_score)
+    """
+    ${sklpar}
+    Parameters
+    ----------
+    results : Orange.evaluation.Results
+        Stored predictions and actual data in model testing.
+
+    target : int, optional (default=None)
+        Value of class to report.
+
+    Examples
+    --------
+    >>> import Orange
+    >>> data = Orange.data.Table('iris')
+    >>> learner = Orange.classification.LogisticRegressionLearner()
+    >>> results = Orange.evaluation.TestOnTrainingData(data, [learner])
+    >>> Orange.evaluation.F1(results)
+    array([ 0.9599359])
+    """
+    __wraps__ = skl_metrics.f1_score
+
+    def compute_score(self, results, target=None):
+        if target is None:
+            if len(results.domain.class_var.values) <= 2:
+                return self.from_predicted(results, skl_metrics.f1_score, average='binary')
+            else:
+                return self.from_predicted(results, skl_metrics.f1_score, average='weighted')
+        else:
+            return np.fromiter(
+                (skl_metrics.f1_score(results.actual, predicted, average=None)[target]
+                 for predicted in results.predicted),
+                dtype=np.float64, count=len(results.predicted))
 
 
 class PrecisionRecallFSupport(Score):
+    __wraps__ = skl_metrics.precision_recall_fscore_support
     is_scalar = False
 
     def compute_score(self, results):
@@ -87,6 +131,17 @@ class PrecisionRecallFSupport(Score):
 
 
 class AUC(Score):
+    """
+    ${sklpar}
+    Parameters
+    ----------
+    results : Orange.evaluation.Results
+        Stored predictions and actual data in model testing.
+
+    target : int, optional (default=None)
+        Value of class to report.
+    """
+    __wraps__ = skl_metrics.roc_auc_score
     separate_folds = True
 
     def calculate_weights(self, results):
@@ -104,19 +159,19 @@ class AUC(Score):
     def multi_class_auc(self, results):
         classes = np.unique(results.actual)
         weights = self.calculate_weights(results)
-        
+
         auc_array = np.array([np.fromiter(
             (skl_metrics.roc_auc_score(results.actual == class_, predicted)
-            for predicted in results.predicted == class_),
+             for predicted in results.predicted == class_),
             dtype=np.float64, count=len(results.predicted))
-            for class_ in classes])
+                              for class_ in classes])
 
         return np.sum(auc_array.T * weights, axis=1)
 
     def compute_score(self, results, target=None):
         domain = results.domain
         n_classes = len(domain.class_var.values)
-        
+
         if n_classes < 2:
             raise ValueError("Class variable has less than two values")
         elif n_classes == 2:
@@ -127,14 +182,57 @@ class AUC(Score):
             else:
                 y = np.array(results.actual == target, dtype=int)
                 return np.fromiter(
-                    (sklearn.metrics.roc_auc_score(y, probabilities[:, target])
+                    (skl_metrics.roc_auc_score(y, probabilities[:, target])
                      for probabilities in results.probabilities),
                     dtype=np.float64, count=len(results.predicted))
+
+
+class LogLoss(Score):
+    """
+    ${sklpar}
+    Parameters
+    ----------
+    results : Orange.evaluation.Results
+        Stored predictions and actual data in model testing.
+
+    eps : float
+        Log loss is undefined for p=0 or p=1, so probabilities are
+        clipped to max(eps, min(1 - eps, p)).
+
+    normalize : bool, optional (default=True)
+        If true, return the mean loss per sample.
+        Otherwise, return the sum of the per-sample losses.
+
+    sample_weight : array-like of shape = [n_samples], optional
+        Sample weights.
+
+    Examples
+    --------
+    >>> import Orange
+    >>> data = Orange.data.Table('iris')
+    >>> majority = Orange.classification.MajorityLearner()
+    >>> results = Orange.evaluation.TestOnTrainingData(data, [majority])
+    >>> Orange.evaluation.LogLoss(results)
+    array([ 1.09861231])
+    """
+    __wraps__ = skl_metrics.log_loss
+
+    def compute_score(self, results, eps=1e-15, normalize=True, sample_weight=None):
+        return np.fromiter(
+            (skl_metrics.log_loss(results.actual,
+                                  probabilities,
+                                  eps=eps,
+                                  normalize=normalize,
+                                  sample_weight=sample_weight)
+             for probabilities in results.probabilities),
+            dtype=np.float64, count=len(results.probabilities))
 
 
 ## Regression scores
 
 class MSE(Score):
+    __wraps__ = skl_metrics.mean_squared_error
+
     def compute_score(self, results):
         return self.from_predicted(results, skl_metrics.mean_squared_error)
 
@@ -145,11 +243,15 @@ class RMSE(Score):
 
 
 class MAE(Score):
+    __wraps__ = skl_metrics.mean_absolute_error
+
     def compute_score(self, results):
         return self.from_predicted(results, skl_metrics.mean_absolute_error)
 
 
 class R2(Score):
+    __wraps__ = skl_metrics.r2_score
+
     def compute_score(self, results):
         return self.from_predicted(results, skl_metrics.r2_score)
 
@@ -252,10 +354,10 @@ def graph_ranks(avranks, names, cd=None, cdmethod=None, lowv=None, highv=None, w
         if not len(lr):
             yield ()
         else:
-            #it can work with single numbers
+            # it can work with single numbers
             index = lr[0]
             if type(1) == type(index):
-                index = [ index ]
+                index = [index]
             for a in range(*index):
                 for b in mxrange(lr[1:]):
                     yield tuple([a] + list(b))
@@ -295,15 +397,15 @@ def graph_ranks(avranks, names, cd=None, cdmethod=None, lowv=None, highv=None, w
     distanceh = 0.25
 
     if cd and cdmethod is None:
-        #get pairs of non significant methods
+        # get pairs of non significant methods
 
         def get_lines(sums, hsd):
-            #get all pairs
+            # get all pairs
             lsums = len(sums)
             allpairs = [(i, j) for i, j in mxrange([[lsums], [lsums]]) if j > i]
-            #remove not significant
+            # remove not significant
             notSig = [(i, j) for i, j in allpairs if abs(sums[i] - sums[j]) <= hsd]
-            #keep only longest
+            # keep only longest
 
             def no_longer(ij_tuple, notSig):
                 i, j = ij_tuple
@@ -319,20 +421,20 @@ def graph_ranks(avranks, names, cd=None, cdmethod=None, lowv=None, highv=None, w
         lines = get_lines(ssums, cd)
         linesblank = 0.2 + 0.2 + (len(lines) - 1) * 0.1
 
-        #add scale
+        # add scale
         distanceh = 0.25
         cline += distanceh
 
-    #calculate height needed height of an image
+    # calculate height needed height of an image
     minnotsignificant = max(2 * 0.2, linesblank)
     height = cline + ((k + 1) / 2) * 0.2 + minnotsignificant
 
     fig = plt.figure(figsize=(width, height))
     fig.set_facecolor('white')
-    ax = fig.add_axes([0, 0, 1, 1]) #reverse y axis
+    ax = fig.add_axes([0, 0, 1, 1])  # reverse y axis
     ax.set_axis_off()
 
-    hf = 1. / height # height factor
+    hf = 1. / height  # height factor
     wf = 1. / width
 
     def hfl(l):
@@ -373,19 +475,19 @@ def graph_ranks(avranks, names, cd=None, cdmethod=None, lowv=None, highv=None, w
 
     k = len(ssums)
 
-    for i in range(math.ceil(k/2)):
+    for i in range(math.ceil(k / 2)):
         chei = cline + minnotsignificant + i * 0.2
         line([(rankpos(ssums[i]), cline), (rankpos(ssums[i]), chei), (textspace - 0.1, chei)], linewidth=0.7)
         text(textspace - 0.2, chei, nnames[i], ha="right", va="center")
 
-    for i in range(math.ceil(k/2), k):
+    for i in range(math.ceil(k / 2), k):
         chei = cline + minnotsignificant + (k - i - 1) * 0.2
         line([(rankpos(ssums[i]), cline), (rankpos(ssums[i]), chei), (textspace + scalewidth + 0.1, chei)],
              linewidth=0.7)
         text(textspace + scalewidth + 0.2, chei, nnames[i], ha="left", va="center")
 
     if cd and cdmethod is None:
-        #upper scale
+        # upper scale
         if not reverse:
             begin, end = rankpos(lowv), rankpos(lowv + cd)
         else:
@@ -396,7 +498,7 @@ def graph_ranks(avranks, names, cd=None, cdmethod=None, lowv=None, highv=None, w
         line([(end, distanceh + bigtick / 2), (end, distanceh - bigtick / 2)], linewidth=0.7)
         text((begin + end) / 2, distanceh - 0.05, "CD", ha="center", va="bottom")
 
-        #non significance lines
+        # non significance lines
         def draw_lines(lines, side=0.05, height=0.1):
             start = cline + 0.2
             for l, r in lines:

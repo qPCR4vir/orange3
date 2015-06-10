@@ -90,19 +90,12 @@ class ScatterPlotItem(pg.ScatterPlotItem):
 
 class OWMDS(widget.OWWidget):
     name = "MDS"
-    description = "Multidimensional scaling"
+    description = "Two-dimensional data projection by multidimensional " \
+                  "scaling constructed from a distance matrix."
     icon = "icons/MDS.svg"
-
-    inputs = (
-        {"name": "Data",
-         "type": Orange.data.Table,
-         "handler": "set_data"},
-        {"name": "Distances",
-         "type": Orange.misc.DistMatrix,
-         "handler": "set_disimilarity"}
-    )
-
-    outputs = ({"name": "Data", "type": Orange.data.Table},)
+    inputs = [("Data", Orange.data.Table, "set_data"),
+              ("Distances", Orange.misc.DistMatrix, "set_disimilarity")]
+    outputs = [("Data", Orange.data.Table)]
 
     #: Initialization type
     PCA, Random = 0, 1
@@ -533,7 +526,11 @@ def colors(data, variable, palette=None):
         else:
             raise TypeError()
 
-    x = numpy.array(data[:, variable]).ravel()
+    x = data[:, variable]
+    if variable in data.domain.metas:
+        x = numpy.array(x.metas, dtype='float').ravel()
+    else:
+        x = numpy.array(x).ravel()
 
     if is_discrete(variable):
         nvalues = len(variable.values)

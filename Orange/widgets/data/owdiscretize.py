@@ -11,6 +11,7 @@ import Orange.preprocess.discretize as disc
 
 from Orange.widgets import widget, gui, settings
 from Orange.widgets.utils import itemmodels, vartype
+from Orange.widgets.widget import OutputSignal, InputSignal
 
 __all__ = ["OWDiscretize"]
 
@@ -123,16 +124,12 @@ class DiscDelegate(QStyledItemDelegate):
 
 class OWDiscretize(widget.OWWidget):
     name = "Discretize"
-    description = "Discretization of continuous attributes."
+    description = "Discretize the continuous data features."
     icon = "icons/Discretize.svg"
-    inputs = [{"name": "Data",
-               "type": Orange.data.Table,
-               "handler": "set_data",
-               "doc": "Input data table"}]
-
-    outputs = [{"name": "Data",
-                "type": Orange.data.Table,
-                "doc": "Table with discretized features"}]
+    inputs = [InputSignal("Data", Orange.data.Table, "set_data",
+                          doc="Input data table")]
+    outputs = [OutputSignal("Data", Orange.data.Table,
+                            doc="Table with discretized features")]
 
     settingsHandler = settings.DomainContextHandler()
     saved_var_states = settings.ContextSetting({})

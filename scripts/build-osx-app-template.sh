@@ -78,16 +78,16 @@ BUNDLE_LITE=$SCRIPT_DIR_NAME/bundle-lite/Orange.app
 
 # Versions of included 3rd party software
 
-PYTHON_VER=3.4.1
-PIP_VER=1.5.6
-SETUPTOOLS_VER=5.7
-NUMPY_VER=1.8.2
-SCIPY_VER=0.14.0
-QT_VER=4.8.6
+PYTHON_VER=3.4.3
+PIP_VER=6.1.1
+
+NUMPY_VER=1.9.2
+SCIPY_VER=0.15.1
+
+QT_VER=4.8.7
 SIP_VER=4.16.2
 PYQT_VER=4.11.1
-SCIKIT_LEARN_VER=0.15.1
-#PYQWT_VER=5.2.0
+SCIKIT_LEARN_VER=0.16.1
 
 # Number of make jobs
 MAKE_JOBS=${MAKE_JOBS:-$(sysctl -n hw.physicalcpu)}
@@ -112,7 +112,7 @@ function create_template {
 	cp "$BUNDLE_LITE"/Contents/Resources/* "$APP"/Contents/Resources
 	cp "$BUNDLE_LITE"/Contents/Info.plist "$APP"/Contents/Info.plist
 
-	cp "$BUNDLE_LITE"/Contents/PkgInfo $APP/Contents/PkgInfo
+	cp "$BUNDLE_LITE"/Contents/PkgInfo "$APP"/Contents/PkgInfo
 
 	cat <<-'EOF' > "$APP"/Contents/MacOS/ENV
 		# Create an environment for running python from the bundle
@@ -138,12 +138,14 @@ function create_template {
 
 		# Some non framework libraries are put in $FRAMEWORKS_DIR by machlib standalone
 		export DYLD_LIBRARY_PATH="$FRAMEWORKS_DIR"${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}
+		export GVBINDIR="$BUNDLE_DIR"/Resources/graphviz/lib/graphviz
+		export PATH="$PATH":"$BUNDLE_DIR"/MacOS
 EOF
 
 }
 
 function install_python() {
-	download_and_extract "http://www.python.org/ftp/python/$PYTHON_VER/Python-$PYTHON_VER.tgz"
+	download_and_extract "https://www.python.org/ftp/python/$PYTHON_VER/Python-$PYTHON_VER.tgz"
 
 	pushd Python-$PYTHON_VER
 
@@ -159,13 +161,14 @@ EOF
 	./configure --enable-framework="$APP"/Contents/Frameworks \
 				--prefix="$APP"/Contents/Resources \
 				--with-universal-archs=intel \
+				--enable-ipv6 \
 				--enable-universalsdk="$SDK"
 
 	make -j $MAKE_JOBS
 
 	# We don't want to install IDLE.app, Python Launcher.app, in /Applications
 	# on the build system.
-	make install PYTHONAPPSDIR=$(pwd)
+	make install PYTHONAPPSDIR="$(pwd)"
 
 	popd
 
@@ -188,39 +191,20 @@ EOF
 
 	chmod +x "$APP"/Contents/MacOS/python
 
+	# Test it
 	"$PYTHON" -c"import sys, hashlib"
 
-}
+	# Install pip/setuptools
+	"$PYTHON" -m ensurepip
+	"$PYTHON" -m pip install pip==$PIP_VER
 
-function install_pip() {
-	download_and_extract "https://pypi.python.org/packages/source/p/pip/pip-$PIP_VER.tar.gz"
-
-	pushd pip-$PIP_VER
-
-	"$PYTHON" setup.py install
 	create_shell_start_script pip
-
-	"$PIP" --version
-
-	popd
-}
-
-function install_setuptools() {
-	download_and_extract "https://pypi.python.org/packages/source/s/setuptools/setuptools-$SETUPTOOLS_VER.tar.gz"
-
-	pushd setuptools-$SETUPTOOLS_VER
-
-	"$PYTHON" setup.py install
 	create_shell_start_script easy_install
-
-	"$EASY_INSTALL" --version
-
-	popd
 }
+
 
 function install_ipython {
-	# install with easy_install (does not work with pip)
-	"$EASY_INSTALL" ipython
+	"$PIP" install ipython
 	create_shell_start_script ipython
 }
 
@@ -302,28 +286,34 @@ function install_pyqt4 {
 	popd
 }
 
-function install_pyqwt5 {
-	download_and_extract "http://sourceforge.net/projects/pyqwt/files/pyqwt5/PyQwt-$PYQWT_VER/PyQwt-$PYQWT_VER.tar.gz"
 
-	pushd PyQwt-$PYQWT_VER/configure
+function install_graphviz {
+	download_and_extract "http://graphviz.org/pub/graphviz/stable/SOURCES/graphviz-2.38.0.tar.gz"
+	pushd graphviz-2.38.0
+	./configure --prefix "$APP"/Contents/Resources/graphviz/ \
+				--with-quartz \
+				--without-qt \
+				--disable-swig \
+				--without-pangocairo \
+				--without-freetype2 \
+				--without-x \
+				--without-rsvg \
+				--without-devil \
+				--without-webp \
+				--without-popler \
+				--without-ghostscript \
+				--without-lasi \
+				--without-fontconfig \
+				--without-gdk \
+				--without-gtk \
+				--without-glut
 
-	# configure.py fails (with ld: library not found for -lcrt1.10.5.o) trying to
-	# build static libraries
-	export CPPFLAGS="--shared"
-
-	PYQWT_VER_SHORT=${PYQWT_VER%%\.[0-9]}
-
-	"$PYTHON" configure.py -Q ../qwt-$PYQWT_VER_SHORT \
-						--extra-cflags="-arch i386 -arch x86_64" \
-						--extra-cxxflags="-arch i386 -arch x86_64" \
-						--extra-lflags="-arch i386 -arch x86_64"
-	make -j $MAKE_JOBS
+	make
 	make install
-
-	unset CPPFLAGS
-
-	"$PYTHON" -c"import PyQt4.Qwt5"
-
+	(
+		cd "$APP"/Contents/MacOS/
+		ln -sf ../Resources/graphviz/bin/* ./
+	)
 	popd
 }
 
@@ -402,7 +392,6 @@ function cleanup {
 	find "$APP"/Contents/ \( -name '*~' -or -name '*.bak' -or -name '*.pyc' -or -name '*.pyo' \) -delete
 
 	find "$APP"/Contents/Frameworks -name '*_debug*' -delete
-
 	find "$APP"/Contents/Frameworks -name '*.la' -delete
 	find "$APP"/Contents/Frameworks -name '*.a' -delete
 	find "$APP"/Contents/Frameworks -name '*.prl' -delete
@@ -410,12 +399,12 @@ function cleanup {
 
 function make_standalone {
 	"$PIP" install macholib==1.5.1
-	"$PYTHON" -m macholib standalone $APP
+	"$PYTHON" -m macholib standalone "$APP"
 	"$PIP" uninstall --yes altgraph
 	"$PIP" uninstall --yes macholib
 }
 
-pushd $BUILD_TEMP
+pushd "$BUILD_TEMP"
 
 echo "Building template in $BUILD_TEMP"
 echo
@@ -423,10 +412,6 @@ echo
 create_template
 
 install_python
-
-install_setuptools
-
-install_pip
 
 install_numpy
 
@@ -443,6 +428,8 @@ install_ipython
 install_scikit_learn
 
 install_psycopg2
+
+install_graphviz
 
 make_standalone
 

@@ -11,20 +11,13 @@ from Orange.widgets import widget, settings, gui
 
 
 class OWSVMRegression(widget.OWWidget):
-    name = "SVM Regression"
-    description = "Support Vector Machine Regression."
+    name = "SVM"
+    description = "Support vector machine regression algorithm."
     icon = "icons/SVMRegression.svg"
-
-    inputs = [{"name": "Data",
-               "type": Orange.data.Table,
-               "handler": "set_data"},
-              {"name": "Preprocessor",
-               "type": Preprocess,
-               "handler": "set_preprocessor"}]
-    outputs = [{"name": "Learner",
-                "type": svm.SVRLearner},
-               {"name": "Predictor",
-                "type": SklModel}]
+    inputs = [("Data", Orange.data.Table, "set_data"),
+              ("Preprocessor", Preprocess, "set_preprocessor")]
+    outputs = [("Learner", svm.SVRLearner),
+               ("Predictor", SklModel)]
 
     learner_name = settings.Setting("SVM Regression")
 

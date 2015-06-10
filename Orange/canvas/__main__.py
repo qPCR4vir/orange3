@@ -12,6 +12,7 @@ import optparse
 import pickle
 import shlex
 import shutil
+import signal
 
 import pkg_resources
 
@@ -44,9 +45,9 @@ def running_in_ipython():
         return False
 
 
-if "PYCHARM_HOSTED" in os.environ:
-    import signal
-    signal.signal(signal.SIGINT, signal.SIG_DFL)
+# Allow termination with CTRL + C
+import signal
+signal.signal(signal.SIGINT, signal.SIG_DFL)
 
 
 def fix_osx_10_9_private_font():
@@ -62,14 +63,6 @@ def fix_osx_10_9_private_font():
                                          "Lucida Grande")
         except AttributeError:
             pass
-
-
-def fix_osx_spacing(app):
-    if sys.platform == "darwin":
-        app.setStyleSheet("""
-            QCheckBox, QRadioButton { padding-top: 2px; padding-bottom: 1px; vertical-align: bottom;}
-            QCheckBoxLabel { padding:20px;}
-            """)
 
 
 def fix_win_pythonw_std_stream():
@@ -171,7 +164,6 @@ def main(argv=None):
 
     log.debug("Starting CanvasApplicaiton with argv = %r.", qt_argv)
     app = CanvasApplication(qt_argv)
-    fix_osx_spacing(app)
 
     # NOTE: config.init() must be called after the QApplication constructor
     config.init()

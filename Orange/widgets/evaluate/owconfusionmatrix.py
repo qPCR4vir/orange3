@@ -20,15 +20,13 @@ def confusion_matrix(res, index):
 
 class OWConfusionMatrix(widget.OWWidget):
     name = "Confusion Matrix"
-    description = "Shows a confusion matrix."
+    description = "Display confusion matrix constructed from results " \
+                  "of evaluation of classifiers."
     icon = "icons/ConfusionMatrix.svg"
     priority = 1001
 
-    inputs = [{"name": "Evaluation Results",
-               "type": Orange.evaluation.Results,
-               "handler": "set_results"}]
-    outputs = [{"name": "Selected Data",
-                "type": Orange.data.Table}]
+    inputs = [("Evaluation Results", Orange.evaluation.Results, "set_results")]
+    outputs = [("Selected Data", Orange.data.Table)]
 
     quantities = ["Number of instances",
                   "Proportion of predicted",

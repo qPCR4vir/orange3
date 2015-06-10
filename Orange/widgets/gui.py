@@ -4,6 +4,7 @@ import re
 import itertools
 from PyQt4 import QtGui, QtCore
 from PyQt4.QtCore import Qt, pyqtSignal as Signal
+from PyQt4.QtGui import QCursor, QApplication
 
 import Orange.data
 from Orange.widgets.utils import getdeepattr
@@ -357,7 +358,7 @@ def widgetLabel(widget, label="", labelWidth=None, **misc):
 
 
 def label(widget, master, label, labelWidth=None, box=None,
-          orientation="vertical", *misc):
+          orientation="vertical", **misc):
     """
     Construct a label that contains references to the master widget's
     attributes; when their values change, the label is updated.
@@ -392,7 +393,7 @@ def label(widget, master, label, labelWidth=None, box=None,
     reprint()
     if labelWidth:
         lbl.setFixedSize(labelWidth, lbl.sizeHint().height())
-    miscellanea(lbl, b, widget, *misc)
+    miscellanea(lbl, b, widget, **misc)
     return lbl
 
 
@@ -1978,7 +1979,9 @@ def auto_commit(widget, master, value, label, auto_label=None, box=True,
 
     def do_commit():
         nonlocal dirty
+        QApplication.setOverrideCursor(QCursor(Qt.WaitCursor))
         master.unconditional_commit()
+        QApplication.restoreOverrideCursor()
         dirty = False
 
     dirty = False
@@ -1995,6 +1998,8 @@ def auto_commit(widget, master, value, label, auto_label=None, box=True,
             orientation = bool(checkbox_label)
         b = widgetBox(widget, box=box, orientation=orientation,
                       addToLayout=False)
+        b.setSizePolicy(QtGui.QSizePolicy.Preferred, QtGui.QSizePolicy.Maximum)
+
     b.checkbox = cb = checkBox(b, master, value, checkbox_label or " ",
                                callback=u, tooltip=auto_label)
     cb.setSizePolicy(QtGui.QSizePolicy.Preferred, QtGui.QSizePolicy.Preferred)

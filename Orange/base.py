@@ -30,6 +30,8 @@ class Learner:
         return self.fit(data.X, data.Y, data.W)
 
     def __call__(self, data):
+        if isinstance(data, Orange.data.Instance):
+            data = Orange.data.Table(data.domain, [data])
         data = self.preprocess(data)
 
         if len(data.domain.class_vars) > 1 and not self.supports_multiclass:
@@ -107,6 +109,7 @@ class Model:
         elif isinstance(data, Orange.data.Instance):
             if data.domain != self.domain:
                 data = Orange.data.Instance(self.domain, data)
+            data = Orange.data.Table(data.domain, [data])
             prediction = self.predict_storage(data)
         elif isinstance(data, Orange.data.Table):
             if data.domain != self.domain:
@@ -216,6 +219,14 @@ class SklModel(Model, metaclass=WrapperMeta):
 
 
 class SklLearner(Learner, metaclass=WrapperMeta):
+    """
+    ${skldoc}
+    Additional Orange parameters
+
+    preprocessors : list, optional (default=[Continuize(), SklImpute(), RemoveNaNColumns()])
+        An ordered list of preprocessors applied to data before
+        training or testing.
+    """
     __wraps__ = None
     __returns__ = SklModel
     _params = None

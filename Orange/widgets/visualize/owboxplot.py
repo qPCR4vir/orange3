@@ -87,15 +87,12 @@ class OWBoxPlot(widget.OWWidget):
     constructed in advance (by layout_changed). Instead, layout_changed and
     display_changed call display_changed_disc that draws everything.
     """
-    name = "Box plot"
-    description = "Shows box plots"
-    long_description = """Shows box plots, either one for or multiple
-    box plots for data split by an attribute value."""
+    name = "Box Plot"
+    description = "Visualize distribution of feature values in a box plots."
     icon = "icons/BoxPlot.svg"
     priority = 100
     author = "Amela Rakanović, Janez Demšar"
     inputs = [("Data", Table, "data")]
-    outputs = [("Basic statistic", Table)]
 
     settingsHandler = DomainContextHandler()
     display = Setting(0)
@@ -232,8 +229,6 @@ class OWBoxPlot(widget.OWWidget):
         self.attr_list_box.clear()
         self.attrCombo.clear()
         self.boxScene.clear()
-        self.send("Basic statistic", None)
-        self.send("Significant data", None)
 
     def attr_changed(self):
         self.compute_box_data()

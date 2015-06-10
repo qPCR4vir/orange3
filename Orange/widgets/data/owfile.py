@@ -5,6 +5,7 @@ from Orange.widgets.settings import Setting
 from Orange.data.table import Table, get_sample_datasets_dir
 from Orange.data import StringVariable, DiscreteVariable, ContinuousVariable
 from Orange.data.io import FileFormats
+from Orange.widgets.widget import OutputSignal
 
 
 def add_origin(examples, filename):
@@ -20,18 +21,17 @@ def add_origin(examples, filename):
 class OWFile(widget.OWWidget):
     name = "File"
     id = "orange.widgets.data.file"
-    description = """
-    Read a data table from a supported file format on the the file system and
-    send it to the the output."""
+    description = "Read a data from an input file " \
+                  "and send the data table to the output."
     icon = "icons/File.svg"
     author = "Janez Demsar"
     maintainer_email = "janez.demsar(@at@)fri.uni-lj.si"
     priority = 10
     category = "Data"
     keywords = ["data", "file", "load", "read"]
-    outputs = [{"name": "Data",
-                "type": Table,
-                "doc": "Attribute-valued data set read from the input file."}]
+    outputs = [OutputSignal(
+        "Data", Table,
+        doc="Attribute-valued data set read from the input file.")]
 
     want_main_area = False
 
