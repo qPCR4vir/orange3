@@ -27,7 +27,7 @@ class KMeans(SklProjector):
             proj = proj.fit(X, Y)
             proj.silhouette = silhouette_score(X, proj.labels_)
         proj.inertia = proj.inertia_ / len(X)
-        cluster_dist = Euclidean(proj.cluster_centers_).X
+        cluster_dist = Euclidean(proj.cluster_centers_)
         proj.inter_cluster = np.mean(cluster_dist[np.triu_indices_from(cluster_dist, 1)])
         return KMeansModel(proj, self.preprocessors)
 
@@ -41,7 +41,7 @@ class KMeansModel(Projection):
     def __call__(self, data):
         if isinstance(data, Table):
             if data.domain is not self.pre_domain:
-                data = Table(self.pkmre_domain, data)
+                data = Table(self.pre_domain, data)
             c = DiscreteVariable(name='Cluster id', values=range(self.k))
             domain = Domain([c])
             return Table(

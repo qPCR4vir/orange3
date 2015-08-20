@@ -4,7 +4,8 @@ import numpy as np
 import scipy
 import bottlechest as bn
 
-import Orange
+from Orange.data import Table, Storage, Instance, Value
+from Orange.preprocess import Continuize, RemoveNaNColumns, SklImpute
 from Orange.misc.wrapper_meta import WrapperMeta
 
 __all__ = ["Learner", "Model", "SklLearner", "SklModel"]
@@ -12,10 +13,12 @@ __all__ = ["Learner", "Model", "SklLearner", "SklModel"]
 
 class Learner:
     supports_multiclass = False
+    supports_weights = False
+    name = 'learner'
     #: A sequence of data preprocessors to apply on data prior to
     #: fitting the model
-    name = 'learner'
     preprocessors = ()
+    learner_adequacy_err_msg = ''
 
     def __init__(self, preprocessors=None):
         if preprocessors is None:
@@ -30,8 +33,13 @@ class Learner:
         return self.fit(data.X, data.Y, data.W)
 
     def __call__(self, data):
-        if isinstance(data, Orange.data.Instance):
-            data = Orange.data.Table(data.domain, [data])
+        if not self.check_learner_adequacy(data.domain):
+            raise ValueError(self.learner_adequacy_err_msg)
+
+        origdomain = data.domain
+
+        if isinstance(data, Instance):
+            data = Table(data.domain, [data])
         data = self.preprocess(data)
 
         if len(data.domain.class_vars) > 1 and not self.supports_multiclass:
@@ -48,6 +56,7 @@ class Learner:
         model.domain = data.domain
         model.supports_multiclass = self.supports_multiclass
         model.name = self.name
+        model.original_domain = origdomain
         return model
 
     def preprocess(self, data):
@@ -60,6 +69,9 @@ class Learner:
 
     def __repr__(self):
         return self.name
+
+    def check_learner_adequacy(self, domain):
+        return True
 
 
 class Model:
@@ -82,13 +94,13 @@ class Model:
         else:
             Y = np.zeros((len(X), len(self.domain.class_vars)))
             Y[:] = np.nan
-            table = Orange.data.Table(self.domain, X, Y)
+            table = Table(self.domain, X, Y)
             return self.predict_storage(table)
 
     def predict_storage(self, data):
-        if isinstance(data, Orange.data.Storage):
+        if isinstance(data, Storage):
             return self.predict(data.X)
-        elif isinstance(data, Orange.data.Instance):
+        elif isinstance(data, Instance):
             return self.predict(np.atleast_2d(data.x))
         raise TypeError("Unrecognized argument (instance of '{}')".format(
                         type(data).__name__))
@@ -97,8 +109,7 @@ class Model:
         if not 0 <= ret <= 2:
             raise ValueError("invalid value of argument 'ret'")
         if (ret > 0
-            and any(isinstance(v, Orange.data.ContinuousVariable)
-                    for v in self.domain.class_vars)):
+            and any(v.is_continuous for v in self.domain.class_vars)):
             raise ValueError("cannot predict continuous distributions")
 
         # Call the predictor
@@ -106,14 +117,20 @@ class Model:
             prediction = self.predict(np.atleast_2d(data))
         elif isinstance(data, scipy.sparse.csr.csr_matrix):
             prediction = self.predict(data)
-        elif isinstance(data, Orange.data.Instance):
+        elif isinstance(data, Instance):
             if data.domain != self.domain:
-                data = Orange.data.Instance(self.domain, data)
-            data = Orange.data.Table(data.domain, [data])
+                data = Instance(self.domain, data)
+            data = Table(data.domain, [data])
             prediction = self.predict_storage(data)
-        elif isinstance(data, Orange.data.Table):
+        elif isinstance(data, Table):
             if data.domain != self.domain:
                 data = data.from_table(self.domain, data)
+            prediction = self.predict_storage(data)
+        elif isinstance(data, (list, tuple)):
+            if not isinstance(data[0], (list, tuple)):
+                data = [ data ]
+            data = Table(self.original_domain, data)
+            data = Table(self.domain, data)
             prediction = self.predict_storage(data)
         else:
             raise TypeError("Unrecognized argument (instance of '{}')".format(
@@ -153,8 +170,8 @@ class Model:
         # Return what we need to
         if ret == Model.Probs:
             return probs
-        if isinstance(data, Orange.data.Instance) and not multitarget:
-            value = Orange.data.Value(self.domain.class_var, value[0])
+        if isinstance(data, Instance) and not multitarget:
+            value = Value(self.domain.class_var, value[0])
         if ret == Model.Value:
             return value
         else:  # ret == Model.ValueProbs
@@ -177,43 +194,6 @@ class SklModel(Model, metaclass=WrapperMeta):
             return value, probs
         return value
 
-    def __call__(self, data, ret=Model.Value):
-        prediction = super().__call__(data, ret=ret)
-
-        if ret == Model.Value:
-            return prediction
-
-        if ret == Model.Probs:
-            probs = prediction
-        else:  # ret == Model.ValueProbs
-            value, probs = prediction
-
-        # Expand probability predictions for class values which are not present
-        if ret != self.Value:
-            n_class = len(self.domain.class_vars)
-            max_values = max(len(cv.values) for cv in self.domain.class_vars)
-            if max_values != probs.shape[-1]:
-                if not self.supports_multiclass:
-                    probs = probs[:, np.newaxis, :]
-                probs_ext = np.zeros((len(probs), n_class, max_values))
-                for c in range(n_class):
-                    i = 0
-                    class_values = len(self.domain.class_vars[c].values)
-                    for cv in range(class_values):
-                        if (i < len(self.used_vals[c]) and
-                                cv == self.used_vals[c][i]):
-                            probs_ext[:, c, cv] = probs[:, c, i]
-                            i += 1
-                if self.supports_multiclass:
-                    probs = probs_ext
-                else:
-                    probs = probs_ext[:, 0, :]
-
-        if ret == Model.Probs:
-            return probs
-        else:  # ret == Model.ValueProbs
-            return value, probs
-
     def __repr__(self):
         return '{} {}'.format(self.name, self.params)
 
@@ -229,12 +209,12 @@ class SklLearner(Learner, metaclass=WrapperMeta):
     """
     __wraps__ = None
     __returns__ = SklModel
-    _params = None
+    _params = {}
 
     name = 'skl learner'
-    preprocessors = [Orange.preprocess.Continuize(normalize_continuous=None),
-                     Orange.preprocess.RemoveNaNColumns(),
-                     Orange.preprocess.SklImpute(force=False)]
+    preprocessors = [Continuize(),
+                     RemoveNaNColumns(),
+                     SklImpute(force=False)]
 
     @property
     def params(self):
@@ -259,7 +239,7 @@ class SklLearner(Learner, metaclass=WrapperMeta):
     def preprocess(self, data):
         data = super().preprocess(data)
 
-        if any(isinstance(v, Orange.data.DiscreteVariable) and len(v.values) > 2
+        if any(v.is_discrete and len(v.values) > 2
                for v in data.domain.attributes):
             raise ValueError("Wrapped scikit-learn methods do not support " +
                              "multinomial variables.")

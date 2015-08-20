@@ -17,13 +17,10 @@ from PyQt4.QtGui import (
 
 import numpy
 
-from Orange.data import (
-    Variable, DiscreteVariable, ContinuousVariable, StringVariable
-)
+from Orange.data import Variable, Storage
 from Orange.widgets import gui
 from Orange.widgets.utils import datacaching
 from Orange.statistics import basic_stats
-from Orange.data import Storage
 
 
 class _store(dict):
@@ -65,6 +62,7 @@ class PyListModel(QAbstractListModel):
     """ A model for displaying python list like objects in Qt item view classes
     """
     MIME_TYPES = ["application/x-Orange-PyListModelData"]
+    Separator = object()
 
     def __init__(self, iterable=None, parent=None,
                  flags=Qt.ItemIsSelectable | Qt.ItemIsEnabled,
@@ -260,9 +258,13 @@ class PyListModel(QAbstractListModel):
 
             if not isinstance(value, list):
                 value = list(value)
+            separators = [start + i for i, v in enumerate(value) if v is self.Separator]
             self.beginInsertRows(QModelIndex(), start, start + len(value) - 1)
             self._list[s] = value
             self._other_data[s] = (_store() for _ in value)
+            for idx in separators:
+                self._other_data[idx]['flags'] = Qt.NoItemFlags
+                self._other_data[idx][Qt.AccessibleDescriptionRole] = 'separator'
             self.endInsertRows()
         else:
             s = len(self) + s if s < 0 else s
@@ -336,6 +338,18 @@ class PyListModel(QAbstractListModel):
             self, mime, action, row, column, parent)
 
 
+class PyListModelTooltip(PyListModel):
+    def __init__(self):
+        super().__init__()
+        self.tooltips = []
+
+    def data(self, index, role=Qt.DisplayRole):
+        if role == Qt.ToolTipRole:
+            return self.tooltips[index.row()]
+        else:
+            return super().data(index, role)
+
+
 class VariableListModel(PyListModel):
 
     MIME_TYPE = "application/x-Orange-VariableList"
@@ -355,11 +369,11 @@ class VariableListModel(PyListModel):
                 return PyListModel.data(self, index, role)
 
     def variable_tooltip(self, var):
-        if isinstance(var, DiscreteVariable):
+        if var.is_discrete:
             return self.discrete_variable_tooltip(var)
-        elif isinstance(var, ContinuousVariable):
+        elif var.is_continuous:
             return self.continuous_variable_toltip(var)
-        elif isinstance(var, StringVariable):
+        elif var.is_string:
             return self.string_variable_tooltip(var)
 
     def variable_labels_tooltip(self, var):

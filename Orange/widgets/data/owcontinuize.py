@@ -2,7 +2,7 @@ from PyQt4 import QtGui
 
 import Orange.data
 from Orange.statistics import distribution
-from Orange.preprocess import Continuize
+from Orange.preprocess import Continuize, Normalize
 from Orange.data.table import Table
 from Orange.widgets import gui, widget
 from Orange.widgets.settings import Setting
@@ -21,6 +21,7 @@ class OWContinuize(widget.OWWidget):
     outputs = [("Data", Orange.data.Table)]
 
     want_main_area = False
+    resizing_enabled = False
 
     multinomial_treatment = Setting(0)
     zero_based = Setting(1)
@@ -42,8 +43,8 @@ class OWContinuize(widget.OWWidget):
 
     continuous_treats = (
         ("Leave them as they are", Continuize.Leave),
-        ("Normalize by span", Continuize.NormalizeBySpan),
-        ("Normalize by standard deviation", Continuize.NormalizeBySD))
+        ("Normalize by span", Normalize.NormalizeBySpan),
+        ("Normalize by standard deviation", Normalize.NormalizeBySD))
 
     class_treats = (
         ("Leave it as it is", Continuize.Leave),
@@ -85,7 +86,6 @@ class OWContinuize(widget.OWWidget):
         gui.auto_commit(self.controlArea, self, "autosend", "Apply")
 
         self.data = None
-        self.resize(150, 300)
 
     def settings_changed(self):
         self.commit()
@@ -111,7 +111,7 @@ class OWContinuize(widget.OWWidget):
     #     self.send("Preprocessor", PreprocessedLearner(
     #         lambda data, weightId=0, tc=(self.targetValue if self.classTreatment else -1):
     #             Table(continuizer(data, weightId, tc)
-    #                 if data.domain.class_var and isinstance(self.data.domain.class_var, DiscreteVariable)
+    #                 if data.domain.has_discrete_class
     #                 else continuizer(data, weightId), data)))
 
     def commit(self):
@@ -138,17 +138,7 @@ class OWContinuize(widget.OWWidget):
 from Orange.preprocess.transformation import \
     Identity, Indicator, Indicator1, Normalizer
 
-from functools import partial, wraps, reduce
-
-
-# flip:: (a * b -> c) -> (b * a -> c)
-def flip(func):
-    """Flip parameter order"""
-    return wraps(func)(lambda a, b: func(b, a))
-
-
-is_discrete = partial(flip(isinstance), Orange.data.DiscreteVariable)
-is_continuous = partial(flip(isinstance), Orange.data.ContinuousVariable)
+from functools import reduce
 
 
 class WeightedIndicator(Indicator):
@@ -176,9 +166,6 @@ class WeightedIndicator_1(Indicator1):
 
 
 def make_indicator_var(source, value_ind, weight=None, zero_based=True):
-    var = Orange.data.ContinuousVariable(
-        "{}={}".format(source.name, source.values[value_ind])
-    )
     if zero_based and weight is None:
         indicator = Indicator(source, value=value_ind)
     elif zero_based:
@@ -187,8 +174,10 @@ def make_indicator_var(source, value_ind, weight=None, zero_based=True):
         indicator = Indicator1(source, value=value_ind)
     else:
         indicator = WeightedIndicator_1(source, value=value_ind, weight=weight)
-    var.compute_value = indicator
-    return var
+    return Orange.data.ContinuousVariable(
+        "{}={}".format(source.name, source.values[value_ind]),
+        compute_value=indicator
+    )
 
 
 def dummy_coding(var, base_value=-1, zero_based=True):
@@ -219,9 +208,9 @@ def continuize_domain(data_or_domain,
 
     def needs_dist(var, mtreat, ctreat):
         "Does the `var` need a distribution given specified flags"
-        if isinstance(var, Orange.data.DiscreteVariable):
+        if var.is_discrete:
             return mtreat == Continuize.FrequentAsBase
-        elif isinstance(var, Orange.data.ContinuousVariable):
+        elif var.is_continuous:
             return ctreat != Continuize.Leave
         else:
             raise ValueError
@@ -267,15 +256,15 @@ def continuize_var(var,
                    continuous_treatment=Continuize.Leave,
                    zero_based=True):
 
-    if isinstance(var, Orange.data.ContinuousVariable):
-        if continuous_treatment == Continuize.NormalizeBySpan:
+    if var.is_continuous:
+        if continuous_treatment == Normalize.NormalizeBySpan:
             return [normalize_by_span(var, data_or_dist, zero_based)]
-        elif continuous_treatment == Continuize.NormalizeBySD:
+        elif continuous_treatment == Normalize.NormalizeBySD:
             return [normalize_by_sd(var, data_or_dist)]
         else:
             return [var]
 
-    elif isinstance(var, Orange.data.DiscreteVariable):
+    elif var.is_discrete:
         if len(var.values) > 2 and \
                 multinomial_treatment == Continuize.ReportError:
             raise ValueError("{0.name} is a multinomial variable".format(var))
@@ -305,11 +294,11 @@ def continuize_var(var,
 
 def _ensure_dist(var, data_or_dist):
     if isinstance(data_or_dist, distribution.Discrete):
-        if not is_discrete(var):
+        if not var.is_discrete:
             raise TypeError
         return data_or_dist
     elif isinstance(data_or_dist, distribution.Continuous):
-        if not is_continuous(var):
+        if not var.is_continuous:
             raise TypeError
         return data_or_dist
     elif isinstance(data_or_dist, Orange.data.Storage):
@@ -319,16 +308,13 @@ def _ensure_dist(var, data_or_dist):
 
 
 def normalized_var(var, translate, scale):
-    new_var = Orange.data.ContinuousVariable(var.name)
-    norm = Normalizer(var, translate, scale)
-    new_var.compute_value = norm
-    return new_var
+    return Orange.data.ContinuousVariable(var.name,
+                                          compute_value=Normalizer(var, translate, scale))
 
 
 def ordinal_to_continuous(var):
-    new_var = Orange.data.ContinuousVariable(var.name)
-    new_var.compute_value = Identity(var)
-    return new_var
+    return Orange.data.ContinuousVariable(var.name,
+                                          compute_value=Identity(var))
 
 
 def ordinal_to_normalized_continuous(var, zero_based=True):
@@ -377,10 +363,8 @@ class DomainContinuizer:
         else:
             domain = data.domain
 
-        if treat == Continuize.ReportError and \
-                any(isinstance(var, Orange.data.DiscreteVariable) and
-                    len(var.values) > 2
-                    for var in domain):
+        if (treat == Continuize.ReportError and
+            any(var.is_discrete and len(var.values) > 2 for var in domain)):
             raise ValueError("Domain has multinomial attributes")
 
         newdomain = continuize_domain(

@@ -17,7 +17,9 @@ from PyQt4.QtGui import (
 )
 
 from PyQt4 import QtGui
-from PyQt4.QtCore import Qt, QObject, QEvent, QSize, QModelIndex, QMimeData
+from PyQt4.QtCore import (
+    Qt, QObject, QEvent, QSize, QModelIndex, QMimeData, QTimer
+)
 from PyQt4.QtCore import pyqtSignal as Signal, pyqtSlot as Slot
 
 
@@ -25,7 +27,7 @@ import Orange.data
 
 from Orange import preprocess
 from Orange.statistics import distribution
-from Orange.preprocess import Continuize
+from Orange.preprocess import Continuize, Randomize as Random
 
 from Orange.widgets import widget, gui, settings
 from .owimpute import RandomTransform
@@ -219,7 +221,7 @@ class DiscretizeEditor(BaseEditor):
         resolved = dict(defaults)
         # update only keys in defaults?
         resolved.update(params)
-        return preprocess.Discretize(method(**params))
+        return preprocess.Discretize(method(**params), remove_const=False)
 
 
 class ContinuizeEditor(BaseEditor):
@@ -274,8 +276,7 @@ class ContinuizeEditor(BaseEditor):
     def createinstance(params):
         params = dict(params)
         treatment = params.pop("multinomial_treatment", Continuize.Indicators)
-        return Continuize(multinomial_treatment=treatment,
-                          normalize_continuous=Continuize.Leave)
+        return Continuize(multinomial_treatment=treatment)
 
 
 class _ImputeRandom:
@@ -294,9 +295,7 @@ class _ImputeRandom:
 
     def __call__(self, data, variable):
         dist = distribution.get_distribution(data, variable)
-        var = copy.copy(variable)
-        var.compute_value = self.ReplaceUnknownsSampleRandom(variable, dist)
-        return var
+        return variable.copy(compute_value=self.ReplaceUnknownsSampleRandom(variable, dist))
 
 
 class _RemoveNaNRows(preprocess.preprocess.Preprocess):
@@ -613,14 +612,11 @@ class _Scaling(preprocess.preprocess.Preprocess):
             else:
                 s = 1
             factor = 1 / s
-            newvar = copy.copy(var)
-            newvar.compute_value = \
-                preprocess.transformation.Normalizer(var, c, factor)
-            return newvar
+            return var.copy(compute_value=preprocess.transformation.Normalizer(var, c, factor))
 
         newvars = []
         for var in data.domain.attributes:
-            if isinstance(var, Orange.data.ContinuousVariable):
+            if var.is_continuous:
                 newvars.append(transform(var))
             else:
                 newvars.append(var)
@@ -688,6 +684,50 @@ class Scale(BaseEditor):
             assert False
 
         return _Scaling(center=center, scale=scale)
+
+
+class _Randomize(preprocess.preprocess.Preprocess):
+    """
+    Randomize data preprocessor.
+    """
+
+    def __init__(self, rand_type=Random.RandomizeClasses):
+        self.rand_type = rand_type
+
+    def __call__(self, data):
+        randomizer = Random(rand_type=self.rand_type)
+        return randomizer(data)
+
+
+class Randomize(BaseEditor):
+    RandomizeClasses, RandomizeAttributes, RandomizeMetas = Random.RandTypes
+
+    def __init__(self, parent=None, **kwargs):
+        super().__init__(parent, **kwargs)
+        self.setLayout(QVBoxLayout())
+
+        form = QFormLayout()
+        self.__rand_type_cb = QComboBox()
+        self.__rand_type_cb.addItems(["Classes",
+                                      "Features",
+                                      "Meta data"])
+
+        form.addRow("Randomize", self.__rand_type_cb)
+        self.layout().addLayout(form)
+        self.__rand_type_cb.currentIndexChanged.connect(self.changed)
+        self.__rand_type_cb.activated.connect(self.edited)
+
+    def setParameters(self, params):
+        rand_type = params.get("rand_type", Randomize.RandomizeClasses)
+        self.__rand_type_cb.setCurrentIndex(rand_type)
+
+    def parameters(self):
+        return {"rand_type": self.__rand_type_cb.currentIndex()}
+
+    @staticmethod
+    def createinstance(params):
+        rand_type = params.get("rand_type", Randomize.RandomizeClasses)
+        return _Randomize(rand_type=rand_type)
 
 
 # This is intended for future improvements.
@@ -758,6 +798,12 @@ PREPROCESSORS = [
         Description("Center and Scale Features",
                     icon_path("Continuize.svg")),
         Scale
+    ),
+    PreprocessAction(
+        "Randomize", "orange.preprocess.randomize", "Randomization",
+        Description("Randomize",
+                    icon_path("Random.svg")),
+        Randomize
     )
 ]
 
@@ -1047,6 +1093,12 @@ class SequenceFlow(QWidget):
             self.__icon = ""
             self.__focusframe = None
 
+            self.__deleteaction = QtGui.QAction(
+                "Remove", self, shortcut=QtGui.QKeySequence.Delete,
+                enabled=False, triggered=self.closeRequested
+            )
+            self.addAction(self.__deleteaction)
+
             if widget is not None:
                 self.setWidget(widget)
             self.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
@@ -1082,11 +1134,13 @@ class SequenceFlow(QWidget):
             event.accept()
             self.__focusframe = QtGui.QFocusFrame(self)
             self.__focusframe.setWidget(self)
+            self.__deleteaction.setEnabled(True)
 
         def focusOutEvent(self, event):
             event.accept()
             self.__focusframe.deleteLater()
             self.__focusframe = None
+            self.__deleteaction.setEnabled(False)
 
         def closeEvent(self, event):
             super().closeEvent(event)
@@ -1116,7 +1170,7 @@ class SequenceFlow(QWidget):
         if self.widgets():
             return super().sizeHint()
         else:
-            return QSize(150, 100)
+            return QSize(250, 350)
 
     def addWidget(self, widget, title):
         """Add `widget` with `title` to list of widgets (in the last position).
@@ -1411,13 +1465,14 @@ class OWPreprocess(widget.OWWidget):
         self.flow_view = SequenceFlow()
         self.controler = Controller(self.flow_view, parent=self)
 
-        self.scroll_area = QtGui.QScrollArea()
+        self.scroll_area = QtGui.QScrollArea(
+            verticalScrollBarPolicy=Qt.ScrollBarAlwaysOn
+        )
         self.scroll_area.viewport().setAcceptDrops(True)
         self.scroll_area.setWidget(self.flow_view)
         self.scroll_area.setWidgetResizable(True)
         self.mainArea.layout().addWidget(self.scroll_area)
-
-        ####
+        self.flow_view.installEventFilter(self)
 
         box = gui.widgetBox(self.controlArea, "Output")
         gui.auto_commit(box, self, "autocommit", "Commit", box=False)
@@ -1444,6 +1499,14 @@ class OWPreprocess(widget.OWWidget):
             model = self.load({})
 
         self.set_model(model)
+
+        if not model.rowCount():
+            # enforce default width constraint if no preprocessors
+            # are instantiated (if the model is not empty the constraints
+            # will be triggered by LayoutRequest event on the `flow_view`)
+            self.__update_size_constraint()
+
+        self.apply()
 
     def load(self, saved):
         """Load a preprocessor list from a dict."""
@@ -1548,7 +1611,12 @@ class OWPreprocess(widget.OWWidget):
     def apply(self):
         preprocessor = self.buildpreproc()
         if self.data is not None:
-            data = preprocessor(self.data)
+            self.error(0)
+            try:
+                data = preprocessor(self.data)
+            except ValueError as e:
+                self.error(0, str(e))
+                return
         else:
             data = None
 
@@ -1563,9 +1631,15 @@ class OWPreprocess(widget.OWWidget):
             QApplication.postEvent(self, QEvent(QEvent.User))
 
     def customEvent(self, event):
-        if self._invalidated:
+        if event.type() == QEvent.User and self._invalidated:
             self._invalidated = False
             self.apply()
+
+    def eventFilter(self, receiver, event):
+        if receiver is self.flow_view and event.type() == QEvent.LayoutRequest:
+            QTimer.singleShot(0, self.__update_size_constraint)
+
+        return super().eventFilter(receiver, event)
 
     def storeSpecificSettings(self):
         """Reimplemented."""
@@ -1582,18 +1656,39 @@ class OWPreprocess(widget.OWWidget):
         self.set_model(None)
         super().onDeleteWidget()
 
+    @Slot()
+    def __update_size_constraint(self):
+        # Update minimum width constraint on the scroll area containing
+        # the 'instantiated' preprocessor list (to avoid the horizontal
+        # scroll bar).
+        sh = self.flow_view.minimumSizeHint()
+        scroll_width = self.scroll_area.verticalScrollBar().width()
+        self.scroll_area.setMinimumWidth(
+            min(max(sh.width() + scroll_width + 2, self.controlArea.width()),
+                520))
 
-def test_main():
-    app = QtGui.QApplication(sys.argv)
+    def sizeHint(self):
+        sh = super().sizeHint()
+        return sh.expandedTo(QSize(sh.width(), 500))
+
+
+def test_main(argv=sys.argv):
+    argv = list(argv)
+    app = QtGui.QApplication(argv)
+
+    if len(argv) > 1:
+        filename = argv[1]
+    else:
+        filename = "brown-selected"
+
     w = OWPreprocess()
-    w.set_data(Orange.data.Table("brown-selected"))
+    w.set_data(Orange.data.Table(filename))
     w.show()
     w.raise_()
     r = app.exec_()
     w.saveSettings()
     w.onDeleteWidget()
     return r
-
 
 if __name__ == "__main__":
     sys.exit(test_main())

@@ -14,7 +14,7 @@ from operator import itemgetter
 
 import pkg_resources
 
-from .provider import IntersphinxHelpProvider
+from . import provider
 
 from PyQt4.QtCore import QObject, QUrl
 
@@ -225,14 +225,18 @@ def get_dist_meta(dist):
         # egg-info
         contents = dist.get_metadata("PKG-INFO")
     elif dist.has_metadata("METADATA"):
+        # dist-info
         contents = dist.get_metadata("METADATA")
-    return parse_meta(contents)
+    else:
+        contents = None
+
+    if contents is not None:
+        return parse_meta(contents)
+    else:
+        return {}
 
 
-def create_intersphinx_provider(entry_point):
-    locations = entry_point.load()
-    dist = entry_point.dist
-
+def _replacements_for_dist(dist):
     replacements = {"PROJECT_NAME": dist.project_name,
                     "PROJECT_NAME_LOWER": dist.project_name.lower(),
                     "PROJECT_VERSION": dist.version}
@@ -240,6 +244,16 @@ def create_intersphinx_provider(entry_point):
         replacements["URL"] = get_dist_url(dist)
     except KeyError:
         pass
+
+    if is_develop_egg(dist):
+        replacements["DEVELOP_ROOT"] = dist.location
+
+    return replacements
+
+
+def create_intersphinx_provider(entry_point):
+    locations = entry_point.load()
+    replacements = _replacements_for_dist(entry_point.dist)
 
     formatter = string.Formatter()
 
@@ -249,38 +263,124 @@ def create_intersphinx_provider(entry_point):
         if inventory:
             format_iter = itertools.chain(format_iter,
                                           formatter.parse(inventory))
-        fields = list(map(itemgetter(1), format_iter))
-        fields = [_f for _f in set(fields) if _f]
+        # Names used in both target and inventory
+        fields = {name for _, name, _, _ in format_iter if name}
 
-        if "DEVELOP_ROOT" in fields:
-            if not is_develop_egg(dist):
-                # skip the location
-                continue
-            target = formatter.format(target, DEVELOP_ROOT=dist.location)
+        if not set(fields) <= set(replacements.keys()):
+            log.warning("Invalid replacement fields %s",
+                        set(fields) - set(replacements.keys()))
+            continue
 
-            if os.path.exists(target) and \
-                    os.path.exists(os.path.join(target, "objects.inv")):
-                return IntersphinxHelpProvider(target=target)
+        target = formatter.format(target, **replacements)
+        if inventory:
+            inventory = formatter.format(inventory, **replacements)
+
+        targeturl = QUrl(target)
+        if not targeturl.isValid():
+            continue
+
+        islocal = targeturl.scheme() == "" or targeturl.scheme() == "file"
+
+        if islocal:
+            if os.path.exists(os.path.join(target, "objects.inv")):
+                inventory = QUrl.fromLocalFile(
+                    os.path.join(target, "objects.inv"))
             else:
-                continue
-        elif fields:
-            try:
-                target = formatter.format(target, **replacements)
-                if inventory:
-                    inventory = formatter.format(inventory, **replacements)
-            except KeyError:
-                log.exception("Error while formating intersphinx mapping "
-                              "'%s', '%s'." % (target, inventory))
+                log.info("Local doc root '%s' does not exist.", target)
                 continue
 
-            return IntersphinxHelpProvider(target=target, inventory=inventory)
         else:
-            return IntersphinxHelpProvider(target=target, inventory=inventory)
+            if not inventory:
+                # Default inventory location
+                inventory = QUrl(target).resolved(QUrl("objects.inv"))
+
+        if inventory is not None:
+            return provider.IntersphinxHelpProvider(
+                inventory=inventory, target=target)
+    return None
+
+
+def create_html_provider(entry_point):
+    locations = entry_point.load()
+    replacements = _replacements_for_dist(entry_point.dist)
+
+    formatter = string.Formatter()
+
+    for target in locations:
+        # Extract all format fields
+        format_iter = formatter.parse(target)
+        fields = {name for _, name, _, _ in format_iter if name}
+
+        if not set(fields) <= set(replacements.keys()):
+            log.warning("Invalid replacement fields %s",
+                        set(fields) - set(replacements.keys()))
+            continue
+        target = formatter.format(target, **replacements)
+
+        targeturl = QUrl(target)
+        if not targeturl.isValid():
+            continue
+
+        islocal = targeturl.scheme() == "" or targeturl.scheme() == "file"
+
+        if islocal:
+            if not os.path.exists(target):
+                log.info("Local doc root '%s' does not exist.", target)
+                continue
+
+        if target:
+            return provider.SimpleHelpProvider(
+                baseurl=QUrl.fromLocalFile(target))
 
     return None
 
 
-_providers = {"intersphinx": create_intersphinx_provider}
+def create_html_inventory_provider(entry_point):
+    locations = entry_point.load()
+    replacements = _replacements_for_dist(entry_point.dist)
+
+    formatter = string.Formatter()
+
+    for target, xpathquery in locations:
+        if isinstance(target, (tuple, list)):
+            pass
+
+        # Extract all format fields
+        format_iter = formatter.parse(target)
+        fields = {name for _, name, _, _ in format_iter if name}
+
+        if not set(fields) <= set(replacements.keys()):
+            log.warning("Invalid replacement fields %s",
+                        set(fields) - set(replacements.keys()))
+            continue
+
+        target = formatter.format(target, **replacements)
+
+        targeturl = QUrl(target)
+        if not targeturl.isValid():
+            continue
+
+        islocal = targeturl.scheme() == "" or targeturl.scheme() == "file"
+
+        if islocal:
+            if not os.path.exists(target):
+                log.info("Local doc root '%s' does not exist", target)
+                continue
+
+            inventory = QUrl.fromLocalFile(target)
+        else:
+            inventory = QUrl(target)
+
+        return provider.HtmlIndexProvider(
+            inventory=inventory, xpathquery=xpathquery)
+
+    return None
+
+_providers = {
+    "intersphinx": create_intersphinx_provider,
+    "html-simple": create_html_provider,
+    "html-index": create_html_inventory_provider,
+}
 
 
 def get_help_provider_for_distribution(dist):

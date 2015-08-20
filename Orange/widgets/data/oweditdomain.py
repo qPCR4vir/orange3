@@ -24,14 +24,6 @@ from Orange.widgets import widget, gui, settings
 from Orange.widgets.utils import itemmodels
 
 
-def is_discrete(var):
-    return isinstance(var, Orange.data.DiscreteVariable)
-
-
-def is_continuous(var):
-    return isinstance(var, Orange.data.ContinuousVariable)
-
-
 def get_qualified(module, name):
     """Return a qualified module member ``name`` inside the named
     ``module``.
@@ -54,7 +46,7 @@ def variable_description(var):
 
     """
     var_type = type(var)
-    if is_discrete(var):
+    if var.is_discrete:
         return (var_type.__module__,
                 var_type.__name__,
                 var.name,
@@ -68,7 +60,7 @@ def variable_description(var):
                 tuple(sorted(var.attributes.items())))
 
 
-def variable_from_description(description):
+def variable_from_description(description, compute_value=None):
     """Construct a variable from its description (see
     :func:`variable_description`).
 
@@ -80,7 +72,7 @@ def variable_from_description(description):
         raise ValueError("Invalid descriptor type '{}.{}"
                          "".format(module, type_name))
 
-    var = constructor(name, **dict(list(kwargs)))
+    var = constructor(name, compute_value=compute_value, **dict(list(kwargs)))
     var.attributes.update(attrs)
     return var
 
@@ -464,12 +456,9 @@ class OWEditDomain(widget.OWWidget):
         def transform(var):
             vdesc = variable_description(var)
             if vdesc in self.domain_change_hints:
-                newvar = variable_from_description(
-                    self.domain_change_hints[vdesc]
-                )
-                newvar.compute_value = \
-                    Orange.preprocess.transformation.Identity(var)
-                return newvar
+                return variable_from_description(
+                    self.domain_change_hints[vdesc],
+                    compute_value=Orange.preprocess.transformation.Identity(var))
             else:
                 return var
 
@@ -494,9 +483,9 @@ class OWEditDomain(widget.OWWidget):
         var = self.domain_model[index]
 
         editor_index = 2
-        if is_discrete(var):
+        if var.is_discrete:
             editor_index = 0
-        elif is_continuous(var):
+        elif var.is_continuous:
             editor_index = 1
         editor = self.editor_stack.widget(editor_index)
         self.editor_stack.setCurrentWidget(editor)
@@ -516,19 +505,16 @@ class OWEditDomain(widget.OWWidget):
         """User edited the current variable in editor."""
         assert 0 <= self.selected_index <= len(self.domain_model)
         editor = self.editor_stack.currentWidget()
-        new_var = editor.get_data()
 
         # Replace the variable in the 'Domain Features' view/model
-        self.domain_model[self.selected_index] = new_var
         old_var = self.input_vars[self.selected_index]
+        new_var = editor.get_data().copy(compute_value=Orange.preprocess.transformation.Identity(old_var))
+        self.domain_model[self.selected_index] = new_var
+
 
         # Store the transformation hint.
         self.domain_change_hints[variable_description(old_var)] = \
                     variable_description(new_var)
-
-        # Make orange's domain transformation work.
-        new_var.compute_value = \
-            Orange.preprocess.transformation.Identity(old_var)
 
         self._invalidate()
 

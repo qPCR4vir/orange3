@@ -18,6 +18,7 @@ import Orange
 from Orange.widgets import widget, gui, settings
 from Orange.widgets.utils import colorpalette, colorbrewer
 from Orange.widgets.evaluate.owrocanalysis import convex_hull
+from Orange.widgets.io import FileFormats
 
 
 CurvePoints = namedtuple(
@@ -66,6 +67,8 @@ class OWLiftCurve(widget.OWWidget):
     fp_cost = settings.Setting(500)
     fn_cost = settings.Setting(500)
     target_prior = settings.Setting(50.0)
+
+    want_graph = True
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -118,6 +121,7 @@ class OWLiftCurve(widget.OWWidget):
 
         self.plotview.setCentralItem(self.plot)
         self.mainArea.layout().addWidget(self.plotview)
+        self.graphButton.clicked.connect(self.save_graph)
 
     def set_results(self, results):
         """Set the input evaluation results."""
@@ -128,8 +132,7 @@ class OWLiftCurve(widget.OWWidget):
             if results.data is None:
                 self.error(0, "Give me data!!")
                 results = None
-            elif not isinstance(results.data.domain.class_var,
-                                Orange.data.DiscreteVariable):
+            elif not results.data.domain.has_discrete_class:
                 self.error(0, "Need discrete class variable")
                 results = None
 
@@ -216,6 +219,13 @@ class OWLiftCurve(widget.OWWidget):
 
     def _on_classifiers_changed(self):
         self._replot()
+
+    def save_graph(self):
+        from Orange.widgets.data.owsave import OWSave
+
+        save_img = OWSave(parent=self, data=self.plot,
+                          file_formats=FileFormats.img_writers)
+        save_img.exec_()
 
 
 def lift_curve_from_results(results, target, clf_idx, subset=slice(0, -1)):

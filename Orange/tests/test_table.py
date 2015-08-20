@@ -5,7 +5,7 @@ from math import isnan
 import random
 
 from Orange import data
-from Orange.data import filter
+from Orange.data import filter, Variable
 from Orange.data import Unknown
 
 import numpy as np
@@ -14,6 +14,7 @@ from unittest.mock import Mock, MagicMock, patch
 
 class TableTestCase(unittest.TestCase):
     def setUp(self):
+        Variable._clear_all_caches()
         data.table.dataset_dirs.append("Orange/tests")
 
     def test_indexing_class(self):
@@ -597,6 +598,53 @@ class TableTestCase(unittest.TestCase):
         with self.assertRaises(ValueError):
             d.extend(x)
 
+        y = d[:2, 1]
+        x.ensure_copy()
+        x.extend(y)
+        np.testing.assert_almost_equal(x[-2:, 1].X, y.X)
+        self.assertEqual(np.isnan(x).sum(), 8)
+
+    def test_copy(self):
+        t = data.Table(np.zeros((5, 3)), np.arange(5), np.zeros((5, 3)))
+
+        copy = t.copy()
+        self.assertTrue(np.all(t.X == copy.X))
+        self.assertTrue(np.all(t.Y == copy.Y))
+        self.assertTrue(np.all(t.metas == copy.metas))
+        copy[0] = [1, 1, 1, 1, 1, 1, 1, 1]
+        self.assertFalse(np.all(t.X == copy.X))
+        self.assertFalse(np.all(t.Y == copy.Y))
+        self.assertFalse(np.all(t.metas == copy.metas))
+
+    def test_concatenate(self):
+        d1 = data.Domain([data.ContinuousVariable('a1')])
+        t1 = data.Table.from_numpy(d1, [[1],
+                                        [2]])
+        d2 = data.Domain([data.ContinuousVariable('a2')], metas=[data.StringVariable('s')])
+        t2 = data.Table.from_numpy(d2, [[3],
+                                        [4]], metas=[['foo'],
+                                                     ['fuu']])
+        self.assertRaises(ValueError, lambda: data.Table.concatenate((t1, t2), axis=5))
+
+        t3 = data.Table.concatenate((t1, t2))
+        self.assertEqual(t3.domain.attributes, t1.domain.attributes + t2.domain.attributes)
+        self.assertEqual(len(t3.domain.metas), 1)
+        self.assertEqual(t3.X.shape, (2,2))
+        self.assertRaises(ValueError, lambda: data.Table.concatenate((t3, t1)))
+
+        t4 = data.Table.concatenate((t3, t3), axis=0)
+        np.testing.assert_equal(t4.X, [[1, 3],
+                                       [2, 4],
+                                       [1, 3],
+                                       [2, 4]])
+        t4 = data.Table.concatenate((t3, t1), axis=0)
+        np.testing.assert_equal(t4.X, [[1, 3],
+                                       [2, 4],
+                                       [1, np.nan],
+                                       [2, np.nan]])
+
+
+
     def test_convert_through_append(self):
         d = data.Table("iris")
         dom2 = data.Domain([d.domain[0], d.domain[2], d.domain[4]])
@@ -826,6 +874,15 @@ class TableTestCase(unittest.TestCase):
             self.assertTrue(e[2] < 4.5 or e[2] > 5.1)
         self.assertEqual(sum((col < 4.5) + (col > 5.1)), len(x))
 
+        f.oper = filter.FilterContinuous.IsDefined
+        f.ref = f.max = None
+        x = filter.Values([f])(d)
+        self.assertEqual(len(x), len(d))
+
+        d[:30, v.petal_length] = Unknown
+        x = filter.Values([f])(d)
+        self.assertEqual(len(x), len(d) - 30)
+
     def test_filter_value_continuous_args(self):
         d = data.Table("iris")
         col = d.X[:, 2]
@@ -893,6 +950,13 @@ class TableTestCase(unittest.TestCase):
 
         f = filter.FilterDiscrete(d.domain.class_var, values=[2, data.Table])
         self.assertRaises(TypeError, d._filter_values, f)
+
+        v = d.columns
+        f = filter.FilterDiscrete(v.hair, values=None)
+        self.assertEqual(len(filter.Values([f])(d)), len(d))
+
+        d[:5, v.hair] = Unknown
+        self.assertEqual(len(filter.Values([f])(d)), len(d) - 5)
 
     def test_valueFilter_string_case_sens(self):
         d = data.Table("zoo")
@@ -1039,8 +1103,29 @@ class TableTestCase(unittest.TestCase):
             self.assertTrue(str(e["name"]).endswith("ion"))
         self.assertEqual(len(x), len([e for e in col if e.endswith("ion")]))
 
+    def test_valueFilter_regex(self):
+        d = data.Table("zoo")
+        f = filter.FilterRegex(d.domain['name'], '^c...$')
+        x = filter.Values([f])(d)
+        self.assertEqual(len(x), 7)
 
-        # TODO Test conjunctions and disjunctions of conditions
+    def test_table_dtypes(self):
+        table = data.Table("iris")
+        metas = np.hstack((table.metas, table.Y.reshape(len(table), 1)))
+        attributes_metas = table.domain.metas + table.domain.class_vars
+        domain_metas = data.Domain(table.domain.attributes,
+                                   table.domain.class_vars,
+                                   attributes_metas)
+        table_metas = data.Table(domain_metas, table.X, table.Y, metas)
+        new_table = data.Table(data.Domain(table_metas.domain.metas,
+                                           table_metas.domain.metas,
+                                           table_metas.domain.metas),
+                               table_metas)
+        self.assertTrue(new_table.X.dtype == np.float64)
+        self.assertTrue(new_table.Y.dtype == np.float64)
+        self.assertTrue(new_table.metas.dtype == np.float64)
+
+    # TODO Test conjunctions and disjunctions of conditions
 
 
 def column_sizes(table):

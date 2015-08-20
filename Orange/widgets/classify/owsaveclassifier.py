@@ -3,7 +3,7 @@ import pickle
 
 from PyQt4 import QtGui
 
-import Orange.classification
+from Orange.base import Model
 
 from Orange.widgets import widget, gui
 from Orange.widgets.settings import Setting
@@ -15,7 +15,7 @@ class OWSaveClassifier(widget.OWWidget):
     icon = "icons/SaveClassifier.svg"
     priority = 3000
 
-    inputs = [("Classifer", Orange.classification.Model, "setModel")]
+    inputs = [("Classifer", Model, "setModel")]
 
     #: Current (last selected) filename or None.
     filename = Setting(None)
@@ -25,6 +25,7 @@ class OWSaveClassifier(widget.OWWidget):
     FILTER = "Pickle files (*.pickle *.pck)\nAll files (*.*)"
 
     want_main_area = False
+    resizing_enabled = False
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -37,6 +38,8 @@ class OWSaveClassifier(widget.OWWidget):
         self.filesCB = gui.comboBox(box, self, "selectedIndex",
                                     callback=self._on_recent)
         self.filesCB.setMinimumContentsLength(20)
+        self.filesCB.setSizeAdjustPolicy(
+            QtGui.QComboBox.AdjustToMinimumContentsLength)
 
         button = gui.button(
             box, self, "...", callback=self.browse, default=True

@@ -15,8 +15,8 @@ import bottlechest as bn
 from scipy import sparse as sp
 
 from .instance import *
-from Orange.data import (domain as orange_domain,
-                         io, DiscreteVariable, ContinuousVariable, Variable)
+from Orange.util import flatten
+from Orange.data import (Domain, io, Variable, StringVariable)
 from Orange.data.storage import Storage
 from . import _contingency
 from . import _valuecount
@@ -187,7 +187,7 @@ class Table(MutableSequence, Storage):
                 return cls.from_file(args[0], **kwargs)
         elif isinstance(args[0], Table):
             return cls.from_table(args[0].domain, args[0])
-        elif isinstance(args[0], orange_domain.Domain):
+        elif isinstance(args[0], Domain):
             domain, args = args[0], args[1:]
             if not args:
                 return cls.from_domain(domain, **kwargs)
@@ -250,7 +250,7 @@ class Table(MutableSequence, Storage):
         :rtype: Orange.data.Table
         """
 
-        def get_columns(row_indices, src_cols, n_rows):
+        def get_columns(row_indices, src_cols, n_rows, dtype=np.float64):
             if not len(src_cols):
                 return np.zeros((n_rows, 0), dtype=source.X.dtype)
 
@@ -259,24 +259,17 @@ class Table(MutableSequence, Storage):
                    for x in src_cols):
                 return _subarray(source.X, row_indices, src_cols)
             if all(isinstance(x, Integral) and x < 0 for x in src_cols):
-                return _subarray(source.metas, row_indices,
+                arr = _subarray(source.metas, row_indices,
                                  [-1 - x for x in src_cols])
+                if arr.dtype != dtype:
+                    return arr.astype(dtype)
+                return arr
             if all(isinstance(x, Integral) and x >= n_src_attrs
                    for x in src_cols):
                 return _subarray(source._Y, row_indices,
                                  [x - n_src_attrs for x in src_cols])
 
-            types = []
-            if any(isinstance(x, Integral) and 0 <= x < n_src_attrs
-                   for x in src_cols):
-                types.append(source.X.dtype)
-            if any(isinstance(x, Integral) and x < 0 for x in src_cols):
-                types.append(source.metas.dtype)
-            if any(isinstance(x, Integral) and x >= n_src_attrs
-                   for x in src_cols):
-                types.append(source._Y.dtype)
-            new_type = np.find_common_type(types, [])
-            a = np.empty((n_rows, len(src_cols)), dtype=new_type)
+            a = np.empty((n_rows, len(src_cols)), dtype=dtype)
             for i, col in enumerate(src_cols):
                 if col is None:
                     a[:, i] = Unknown
@@ -321,7 +314,12 @@ class Table(MutableSequence, Storage):
             if self.X.ndim == 1:
                 self.X = self.X.reshape(-1, len(self.domain.attributes))
             self.Y = get_columns(row_indices, conversion.class_vars, n_rows)
-            self.metas = get_columns(row_indices, conversion.metas, n_rows)
+
+            dtype = np.float64
+            if any(isinstance(var, StringVariable) for var in domain.metas):
+                dtype = np.object
+            self.metas = get_columns(row_indices, conversion.metas,
+                                     n_rows, dtype)
             if self.metas.ndim == 1:
                 self.metas = self.metas.reshape(-1, len(self.domain.metas))
             if source.has_weights():
@@ -391,7 +389,7 @@ class Table(MutableSequence, Storage):
         if Y is not None and Y.ndim == 1:
             Y = Y.reshape(Y.shape[0], 1)
         if domain is None:
-            domain = orange_domain.Domain.from_numpy(X, Y, metas)
+            domain = Domain.from_numpy(X, Y, metas)
 
         if Y is None:
             if sp.issparse(X):
@@ -461,6 +459,13 @@ class Table(MutableSequence, Storage):
         with cls._next_instance_lock:
             obj.ids = np.array(range(cls._next_instance_id, cls._next_instance_id + obj.X.shape[0]))
             cls._next_instance_id += obj.X.shape[0]
+
+    @classmethod
+    def new_id(cls):
+        with cls._next_instance_lock:
+            id = cls._next_instance_id
+            cls._next_instance_id += 1
+            return id
 
     FILE_FORMATS = {
         ".tab": (io.TabDelimFormat, )
@@ -649,7 +654,7 @@ class Table(MutableSequence, Storage):
                          if col >= n_attrs]
             r_metas = [attributes[i]
                        for i, col in enumerate(col_indices) if col < 0]
-            domain = orange_domain.Domain(r_attrs, r_classes, r_metas)
+            domain = Domain(r_attrs, r_classes, r_metas)
         else:
             domain = self.domain
         return Table.from_table(domain, self, row_idx)
@@ -841,15 +846,50 @@ class Table(MutableSequence, Storage):
             else:
                 for i, example in enumerate(instances):
                     self[old_length + i] = example
-                try:
-                    self[old_length + i] = example.id
-                except:
-                    with type(self)._next_instance_lock:
-                        self.ids[old_length + i] = type(self)._next_instance_id
-                        type(self)._next_instance_id += 1
+                    try:
+                        self.ids[old_length + i] = example.id
+                    except AttributeError:
+                        self.ids[old_length + i] = self.new_id()
         except Exception:
             self._resize_all(old_length)
             raise
+
+    @staticmethod
+    def concatenate(tables, axis=1):
+        """Return concatenation of `tables` by `axis`."""
+        if not tables:
+            raise ValueError('need at least one table to concatenate')
+        if 1 == len(tables):
+            return tables[0].copy()
+        CONCAT_ROWS, CONCAT_COLS = 0, 1
+        if axis == CONCAT_ROWS:
+            table = tables[0].copy()
+            for t in tables[1:]:
+                table.extend(t)
+            return table
+        elif axis == CONCAT_COLS:
+            from operator import iand, attrgetter
+            from functools import reduce
+            if reduce(iand,
+                      (set(map(attrgetter('name'),
+                               chain(t.domain.variables, t.domain.metas)))
+                       for t in tables)):
+                raise ValueError('Concatenating two domains with variables '
+                                 'with same name is undefined')
+            domain = Domain(flatten(t.domain.attributes for t in tables),
+                            flatten(t.domain.class_vars for t in tables),
+                            flatten(t.domain.metas for t in tables))
+
+            def ndmin(A):
+                return A if A.ndim > 1 else A.reshape(A.shape[0], 1)
+
+            table = Table.from_numpy(domain,
+                                     np.hstack(tuple(ndmin(t.X) for t in tables)),
+                                     np.hstack(tuple(ndmin(t.Y) for t in tables)),
+                                     np.hstack(tuple(ndmin(t.metas) for t in tables)),
+                                     np.hstack(tuple(ndmin(t.W) for t in tables)))
+            return table
+        raise ValueError('axis {} out of bounds [0, 2)'.format(axis))
 
     def is_view(self):
         """
@@ -881,6 +921,14 @@ class Table(MutableSequence, Storage):
             self.metas = self.metas.copy()
         if self.W.base is not None:
             self.W = self.W.copy()
+
+    def copy(self):
+        """
+        Return a copy of the table
+        """
+        t = Table(self)
+        t.ensure_copy()
+        return t
 
     @staticmethod
     def __determine_density(data):
@@ -1055,9 +1103,9 @@ class Table(MutableSequence, Storage):
                     or isinstance(f, data_filter.FilterContinuous) and \
                                     f.oper == f.IsDefined:
                 if conjunction:
-                    sel *= np.isnan(col)
+                    sel *= ~np.isnan(col)
                 else:
-                    sel += np.isnan(col)
+                    sel += ~np.isnan(col)
             elif isinstance(f, data_filter.FilterString) and \
                             f.oper == f.IsDefined:
                 if conjunction:
@@ -1090,6 +1138,8 @@ class Table(MutableSequence, Storage):
                 else:
                     sel = reduce(operator.add,
                                  (col == val for val in vals), sel)
+            elif isinstance(f, data_filter.FilterRegex):
+                sel = np.vectorize(f)(col)
             elif isinstance(f, (data_filter.FilterContinuous,
                                 data_filter.FilterString)):
                 if (isinstance(f, data_filter.FilterString) and
@@ -1148,6 +1198,7 @@ class Table(MutableSequence, Storage):
                                       "not implemented yet")
         W = self.W if self.has_weights() else None
         rr = []
+        stats = []
         if not columns:
             if self.domain.attributes:
                 rr.append(bn.stats(self.X, W))
@@ -1155,14 +1206,14 @@ class Table(MutableSequence, Storage):
                 rr.append(bn.stats(self._Y, W))
             if include_metas and self.domain.metas:
                 rr.append(bn.stats(self.metas, W))
-            stats = np.vstack(tuple(rr))
+            if len(rr):
+                stats = np.vstack(tuple(rr))
         else:
             columns = [self.domain.index(c) for c in columns]
             nattrs = len(self.domain.attributes)
             Xs = any(0 <= c < nattrs for c in columns) and bn.stats(self.X, W)
             Ys = any(c >= nattrs for c in columns) and bn.stats(self._Y, W)
             ms = any(c < 0 for c in columns) and bn.stats(self.metas, W)
-            stats = []
             for column in columns:
                 if 0 <= column < nattrs:
                     stats.append(Xs[column, :])
@@ -1205,7 +1256,7 @@ class Table(MutableSequence, Storage):
                 m, W, Xcsc = _get_matrix(self.X, Xcsc, col)
             else:
                 m, W, Ycsc = _get_matrix(self._Y, Ycsc, col - self.X.shape[1])
-            if isinstance(var, DiscreteVariable):
+            if var.is_discrete:
                 if W is not None:
                     W = W.ravel()
                 dist, unknowns = bn.bincount(m, len(var.values) - 1, W)
@@ -1241,7 +1292,7 @@ class Table(MutableSequence, Storage):
                 raise ValueError("No row variable")
 
         row_desc = self.domain[row_var]
-        if not isinstance(row_desc, DiscreteVariable):
+        if not row_desc.is_discrete:
             raise TypeError("Row variable must be discrete")
         row_indi = self.domain.index(row_var)
         n_rows = len(row_desc.values)
@@ -1257,12 +1308,12 @@ class Table(MutableSequence, Storage):
         col_desc = [self.domain[var] for var in col_vars]
         col_indi = [self.domain.index(var) for var in col_vars]
 
-        if any(not isinstance(var, (ContinuousVariable, DiscreteVariable))
+        if any(not (var.is_discrete or var.is_continuous)
                for var in col_desc):
             raise ValueError("contingency can be computed only for discrete "
                              "and continuous values")
 
-        if any(isinstance(var, ContinuousVariable) for var in col_desc):
+        if any(var.is_continuous for var in col_desc):
             if bn.countnans(row_data):
                 raise ValueError("cannot compute contigencies with missing "
                                  "row data")
@@ -1276,7 +1327,7 @@ class Table(MutableSequence, Storage):
             arr_indi = [e for e, ind in enumerate(col_indi) if f_cond(ind)]
 
             vars = [(e, f_ind(col_indi[e]), col_desc[e]) for e in arr_indi]
-            disc_vars = [v for v in vars if isinstance(v[2], DiscreteVariable)]
+            disc_vars = [v for v in vars if v[2].is_discrete]
             if disc_vars:
                 if sp.issparse(arr):
                     max_vals = max(len(v[2].values) for v in disc_vars)
@@ -1291,8 +1342,7 @@ class Table(MutableSequence, Storage):
                         contingencies[col_i] = bn.contingency(arr[:, arr_i],
                                                               row_data, len(var.values) - 1, n_rows - 1, W)
 
-            cont_vars = [v for v in vars
-                         if isinstance(v[2], ContinuousVariable)]
+            cont_vars = [v for v in vars if v[2].is_continuous]
             if cont_vars:
 
                 classes = row_data.astype(dtype=np.int8)

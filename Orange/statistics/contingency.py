@@ -28,6 +28,10 @@ def _get_variable(variable, dat, attr_name,
     return variable
 
 
+def create_discrete(cls, *args):
+    return cls(*args)
+
+
 class Discrete(np.ndarray):
     def __new__(cls, dat=None, col_variable=None, row_variable=None, unknowns=None):
         if isinstance(dat, data.Storage):
@@ -76,8 +80,9 @@ class Discrete(np.ndarray):
             self[...] = dist
             self.unknowns = unknowns
         except NotImplementedError:
-            self = np.zeros(
-                (len(row_variable.values), len(col_variable.values)))
+            shape = len(row_variable.values), len(col_variable.values)
+            self = super().__new__(cls, shape)
+            self[...] = np.zeros(shape)
             self.unknowns = 0
             rind = data.domain.index(row_variable)
             cind = data.domain.index(col_variable)
@@ -144,6 +149,9 @@ class Discrete(np.ndarray):
             if axis is None or axis == 1:
                 self.unknowns /= t
 
+    def __reduce__(self):
+        return create_discrete, (Discrete, np.copy(self), self.col_variable, self.row_variable, self.unknowns)
+
 
 class Continuous:
     def __init__(self, dat=None, col_variable=None, row_variable=None,
@@ -202,7 +210,7 @@ class Continuous:
         ind = C > 0
         return np.vstack((self.values[ind], C[ind]))
 
-    
+
     def __len__(self):
         return self.counts.shape[0]
 
@@ -234,9 +242,9 @@ class Continuous:
 
 def get_contingency(dat, col_variable, row_variable=None, unknowns=None):
     variable = _get_variable(col_variable, dat, "col_variable")
-    if isinstance(variable, data.DiscreteVariable):
+    if variable.is_discrete:
         return Discrete(dat, col_variable, row_variable, unknowns)
-    elif isinstance(variable, data.ContinuousVariable):
+    elif variable.is_continuous:
         return Continuous(dat, col_variable, row_variable, unknowns)
     else:
         raise TypeError("cannot compute distribution of '%s'" %
@@ -251,11 +259,9 @@ def get_contingencies(dat, skipDiscrete=False, skipContinuous=False):
     if skipDiscrete:
         if skipContinuous:
             return []
-        columns = [i for i, var in enumerate(vars)
-                   if isinstance(var, data.ContinuousVariable)]
+        columns = [i for i, var in enumerate(vars) if var.is_continuous]
     elif skipContinuous:
-        columns = [i for i, var in enumerate(vars)
-                   if isinstance(var, data.DiscreteVariable)]
+        columns = [i for i, var in enumerate(vars) if var.is_discrete]
     else:
         columns = None
     try:

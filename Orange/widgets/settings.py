@@ -5,21 +5,17 @@ import itertools
 import pickle
 import warnings
 
-try:
-    from Orange.canvas.utils import environ
-    store_settings = True
-except ImportError:
-    store_settings = False
-
-from Orange.data import DiscreteVariable, Domain, Variable, ContinuousVariable
+from Orange.misc.environ import widget_settings_dir
+from Orange.data import Domain, Variable
 from Orange.widgets.utils import vartype
 
 __all__ = ["Setting", "SettingsHandler",
            "ContextSetting", "ContextHandler",
            "DomainContextHandler", "PerfectDomainContextHandler",
-           "ClassValuesContextHandler"]
+           "ClassValuesContextHandler", "widget_settings_dir"]
 
 _immutables = (str, int, bytes, bool, float, tuple)
+
 
 class Setting:
     """Description of a setting.
@@ -42,6 +38,9 @@ class Setting:
         return "%s \"%s\"" % (self.__class__.__name__, self.name)
 
     __repr__ = __str__
+
+    def __getnewargs__(self):
+        return (self.default, )
 
 
 class SettingProvider:
@@ -70,9 +69,11 @@ class SettingProvider:
         for name in dir(provider_class):
             value = getattr(provider_class, name, None)
             if isinstance(value, Setting):
+                value = copy.deepcopy(value)
                 value.name = name
                 self.settings[name] = value
             if isinstance(value, SettingProvider):
+                value = copy.deepcopy(value)
                 value.name = name
                 self.providers[name] = value
 
@@ -235,11 +236,8 @@ class SettingsHandler:
         """Read (global) defaults for this widget class from a file.
         Opens a file and calls :obj:`read_defaults_file`. Derived classes
         should overload the latter."""
-        if not store_settings:
-            return
-
         filename = self._get_settings_filename()
-        if os.path.exists(filename):
+        if os.path.isfile(filename):
             settings_file = open(filename, "rb")
             try:
                 self.read_defaults_file(settings_file)
@@ -262,10 +260,9 @@ class SettingsHandler:
         """Write (global) defaults for this widget class to a file.
         Opens a file and calls :obj:`write_defaults_file`. Derived classes
         should overload the latter."""
-        if not store_settings:
-            return
-
         filename = self._get_settings_filename()
+        os.makedirs(os.path.dirname(filename), exist_ok=True)
+
         settings_file = open(filename, "wb")
         try:
             self.write_defaults_file(settings_file)
@@ -281,8 +278,9 @@ class SettingsHandler:
 
     def _get_settings_filename(self):
         """Return the name of the file with default settings for the widget"""
-        return os.path.join(environ.widget_settings_dir,
-                            self.widget_class.name + ".ini")
+        return os.path.join(widget_settings_dir(),
+                            "{0.__module__}.{0.__qualname__}.pickle"
+                            .format(self.widget_class))
 
     def initialize(self, instance, data=None):
         """
@@ -611,8 +609,7 @@ class DomainContextHandler(ContextHandler):
             if not encode_values:
                 return {v.name: vartype(v) for v in attributes}
 
-            is_discrete = lambda x: isinstance(x, DiscreteVariable)
-            return {v.name: v.values if is_discrete(v) else vartype(v)
+            return {v.name: v.values if v.is_discrete else vartype(v)
                     for v in attributes}
 
         match = self.match_values
@@ -837,7 +834,7 @@ class IncompatibleContext(Exception):
 class ClassValuesContextHandler(ContextHandler):
     def open_context(self, widget, classes):
         if isinstance(classes, Variable):
-            if isinstance(classes, DiscreteVariable):
+            if classes.is_discrete:
                 classes = classes.values
             else:
                 classes = None
@@ -851,7 +848,7 @@ class ClassValuesContextHandler(ContextHandler):
 
     #noinspection PyMethodOverriding
     def match(self, context, classes):
-        if isinstance(classes, ContinuousVariable):
+        if isinstance(classes, Variable) and classes.is_continuous:
             return context.classes is None and 2
         else:
             return context.classes == classes and 2
@@ -884,11 +881,8 @@ class PerfectDomainContextHandler(DomainContextHandler):
     def encode_domain(self, domain):
         if self.match_values == 2:
             def encode(attrs):
-                return tuple(
-                    (v.name,
-                     v.values if isinstance(v, DiscreteVariable)
-                     else vartype(v))
-                    for v in attrs)
+                return tuple((v.name, v.values if v.is_discrete else vartype(v))
+                             for v in attrs)
         else:
             def encode(attrs):
                 return tuple((v.name, vartype(v)) for v in attrs)

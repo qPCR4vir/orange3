@@ -29,6 +29,7 @@ class OWPurgeDomain(widget.OWWidget):
     sortClasses = Setting(True)
 
     want_main_area = False
+    resizing_enabled = False
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -247,9 +248,8 @@ def merge_transforms(exp):
             new_var = Orange.data.DiscreteVariable(
                 exp.var.name,
                 values=exp.var.values,
-                ordered=exp.var.ordered
-            )
-            new_var.compute_value = merge_lookup(A, B)
+                ordered=exp.var.ordered,
+                compute_value=merge_lookup(A, B))
             assert isinstance(prev.sub, Var)
             return Transformed(prev.sub, new_var)
         else:
@@ -266,7 +266,7 @@ def purge_var_M(var, data, flags):
         if var is None:
             return Removed(state, state.var)
 
-    if isinstance(state.var, Orange.data.DiscreteVariable):
+    if state.var.is_discrete:
         if flags & RemoveUnusedValues:
             newattr = remove_unused_values(state.var, data)
 
@@ -302,18 +302,18 @@ def purge_domain(data, attribute_flags=RemoveConstant | RemoveUnusedValues,
 
 def has_at_least_two_values(data, var):
     ((dist, _), ) = data._compute_distributions([var])
-    if isinstance(var, Orange.data.ContinuousVariable):
+    if var.is_continuous:
         dist = dist[1, :]
     return numpy.sum(dist > 0.0) > 1
 
 
 def remove_constant(var, data):
-    if isinstance(var, Orange.data.ContinuousVariable):
+    if var.is_continuous:
         if not has_at_least_two_values(data, var):
             return None
         else:
             return var
-    elif isinstance(var, Orange.data.DiscreteVariable):
+    elif var.is_discrete:
         if len(var.values) < 2:
             return None
         else:
@@ -335,20 +335,21 @@ def remove_unused_values(var, data):
         return var
 
     used_values = [var.values[i] for i in unique]
-    new_var = Orange.data.DiscreteVariable(
-        "R_{}".format(var.name),
-        values=used_values
-    )
     translation_table = numpy.array([numpy.NaN] * len(var.values))
-    translation_table[unique] = range(len(new_var.values))
+    translation_table[unique] = range(len(used_values))
 
+    base_value = -1
     if 0 >= var.base_value < len(var.values):
         base = translation_table[var.base_value]
         if numpy.isfinite(base):
-            new_var.base_value = int(base)
+            base_value = int(base)
 
-    new_var.compute_value = Lookup(var, translation_table)
-    return new_var
+    return Orange.data.DiscreteVariable(
+        "R_{}".format(var.name),
+        values=used_values,
+        base_value=base_value,
+        compute_value=Lookup(var, translation_table)
+    )
 
 
 def sort_var_values(var):
@@ -361,9 +362,8 @@ def sort_var_values(var):
         [float(newvalues.index(value)) for value in var.values]
     )
 
-    newvar = Orange.data.DiscreteVariable(var.name, values=newvalues)
-    newvar.compute_value = Lookup(var, translation_table)
-    return newvar
+    return Orange.data.DiscreteVariable(var.name, values=newvalues,
+                                        compute_value=Lookup(var, translation_table))
 
 from Orange.preprocess.transformation import Lookup
 

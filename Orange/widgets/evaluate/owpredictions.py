@@ -9,6 +9,7 @@ import numpy
 from PyQt4 import QtCore, QtGui
 
 import Orange
+from Orange.base import Model
 from Orange.data import ContinuousVariable, DiscreteVariable
 from Orange.widgets import widget, gui
 from Orange.widgets.settings import Setting
@@ -37,7 +38,7 @@ class OWPredictions(widget.OWWidget):
     priority = 200
     description = "Display predictions of models for an input data set."
     inputs = [("Data", Orange.data.Table, "set_data"),
-              ("Predictors", Orange.classification.Model,
+              ("Predictors", Model,
                "set_predictor", widget.Multiple)]
     outputs = [("Predictions", Orange.data.Table),
                ("Evaluation Results", Orange.evaluation.Results)]
@@ -45,6 +46,9 @@ class OWPredictions(widget.OWWidget):
     show_attrs = Setting(True)
     show_predictions = Setting(True)
     show_probabilities = Setting(True)
+
+    want_main_area = False
+    resizing_enabled = False
 
     def __init__(self):
         super().__init__()
@@ -63,9 +67,6 @@ class OWPredictions(widget.OWWidget):
             box, self, "show_probabilities", "Probabilities",
             callback=self.commit)
 
-        QtGui.qApp.processEvents()
-        QtCore.QTimer.singleShot(0, self.fix_size)
-
         #: input data
         self.data = None
         #: A dict mapping input ids to PredictorSlot
@@ -73,9 +74,10 @@ class OWPredictions(widget.OWWidget):
         #: A class variable (prediction target)
         self.class_var = None
 
-    def fix_size(self):
-        self.adjustSize()
-        self.setFixedSize(self.size())
+        # enforce fixed size but provide a sensible minimum width constraint.
+        self.layout().activate()
+        self.controlArea.setMinimumWidth(self.controlArea.sizeHint().width())
+        self.layout().setSizeConstraint(QtGui.QLayout.SetFixedSize)
 
     def set_data(self, data):
         self.data = data
@@ -92,12 +94,22 @@ class OWPredictions(widget.OWWidget):
             self.class_var = predictor.domain.class_var
 
     def handleNewSignals(self):
+        self.error(0)
         for inputid, pred in list(self.predictors.items()):
             if pred.predictor is None:
                 del self.predictors[inputid]
-            elif pred.results is None:
+            elif pred.results is None or numpy.isnan(pred.results[0]).all():
                 if self.data is not None:
-                    results = self.predict(pred.predictor, self.data)
+                    try:
+                        results = self.predict(pred.predictor, self.data)
+                    except ValueError as err:
+                        err_msg = '{}:\n'.format(pred.predictor.name) + str(err)
+                        self.error(0, err_msg)
+                        n, m = len(self.data), 1
+                        if self.data.domain.has_discrete_class:
+                            m = len(self.data.domain.class_var.values)
+                        probabilities = numpy.full((n, m), numpy.nan)
+                        results = (numpy.full(n, numpy.nan), probabilities)
                     self.predictors[inputid] = pred._replace(results=results)
         if not self.predictors:
             self.class_var = None
@@ -123,7 +135,7 @@ class OWPredictions(widget.OWWidget):
             info.append("Predictors: N/A")
 
         if self.class_var is not None:
-            if self.is_discrete(self.class_var):
+            if self.class_var.is_discrete:
                 info.append("Task: Classification")
                 self.checkbox_class.setEnabled(True)
                 self.checkbox_prob.setEnabled(True)
@@ -149,7 +161,7 @@ class OWPredictions(widget.OWWidget):
 
         predictor = next(iter(self.predictors.values())).predictor
         class_var = predictor.domain.class_var
-        classification = self.is_discrete(class_var)
+        classification = class_var and class_var.is_discrete
 
         newattrs = []
         newcolumns = []
@@ -217,31 +229,31 @@ class OWPredictions(widget.OWWidget):
 
     @classmethod
     def predict(cls, predictor, data):
-        if isinstance(predictor.domain.class_var, DiscreteVariable):
-            return cls.predict_discrete(predictor, data)
-        elif isinstance(predictor.domain.class_var, ContinuousVariable):
-            return cls.predict_continuous(predictor, data)
+        class_var = predictor.domain.class_var
+        if class_var:
+            if class_var.is_discrete:
+                return cls.predict_discrete(predictor, data)
+            elif class_var.is_continuous:
+                return cls.predict_continuous(predictor, data)
 
     @staticmethod
     def predict_discrete(predictor, data):
-        return predictor(data, Orange.classification.Model.ValueProbs)
+        return predictor(data, Model.ValueProbs)
 
     @staticmethod
     def predict_continuous(predictor, data):
-        values = predictor(data, Orange.classification.Model.Value)
+        values = predictor(data, Model.Value)
         return values, [None] * len(data)
-
-    @staticmethod
-    def is_discrete(var):
-        return isinstance(var, Orange.data.DiscreteVariable)
 
 
 if __name__ == "__main__":
     app = QtGui.QApplication([])
     w = OWPredictions()
     data = Orange.data.Table("iris")
-    svm_clf = Orange.classification.SVMLearner(probability=True)(data)
-    lr_clf = Orange.classification.LogisticRegressionLearner()(data)
+#    svm_clf = Orange.classification.SVMLearner(probability=True)(data)
+#    lr_clf = Orange.classification.LogisticRegressionLearner()(data)
+    svm_clf = Orange.regression.RidgeRegressionLearner(alpha=1.0)(data)
+    lr_clf = Orange.regression.LinearRegressionLearner()(data)
     w.set_data(data)
     w.set_predictor(svm_clf, 0)
     w.set_predictor(lr_clf, 1)

@@ -2,7 +2,6 @@ import numpy as np
 
 from Orange.classification import Learner, Model
 from Orange.classification.simple_tree import SimpleTreeLearner
-from Orange.data import DiscreteVariable
 
 __all__ = ['SimpleRandomForestLearner']
 
@@ -42,11 +41,10 @@ class SimpleRandomForestLearner(Learner):
         Random seed.
     """
 
-    name = 'simple rf'
+    name = 'simple rf class'
 
     def __init__(self, n_estimators=10, min_instances=2, max_depth=1024,
                  max_majority=1.0, skip_prob='sqrt', seed=42):
-
         self.n_estimators = n_estimators
         self.skip_prob = skip_prob
         self.max_depth = max_depth
@@ -59,15 +57,9 @@ class SimpleRandomForestLearner(Learner):
 
 
 class SimpleRandomForestModel(Model):
-
     def __init__(self, learner, data):
         self.estimators_ = []
-
-        if isinstance(data.domain.class_var, DiscreteVariable):
-            self.type = 'classification'
-            self.cls_vals = len(data.domain.class_var.values)
-        else:
-            assert(False)
+        self.cls_vals = len(data.domain.class_var.values)
         self.learn(learner, data)
 
     def learn(self, learner, data):
@@ -79,11 +71,8 @@ class SimpleRandomForestModel(Model):
             self.estimators_.append(tree(data))
 
     def predict_storage(self, data):
-        if self.type == 'classification':
-            p = np.zeros((data.X.shape[0], self.cls_vals))
-            for tree in self.estimators_:
-                p += tree(data, tree.Probs)
-            p /= len(self.estimators_)
-            return p.argmax(axis=1), p
-        else:
-            assert(False)
+        p = np.zeros((data.X.shape[0], self.cls_vals))
+        for tree in self.estimators_:
+            p += tree(data, tree.Probs)
+        p /= len(self.estimators_)
+        return p.argmax(axis=1), p

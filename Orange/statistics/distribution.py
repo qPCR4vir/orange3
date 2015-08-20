@@ -65,7 +65,8 @@ class Discrete(np.ndarray):
             self[:] = dist
             self.unknowns = unknowns
         except NotImplementedError:
-            self = np.zeros(len(variable.values))
+            self = super().__new__(cls, len(variable.values))
+            self[:] = np.zeros(len(variable.values))
             self.unknowns = 0
             if data.has_weights():
                 for val, w in zip(data[:, variable], data.W):
@@ -88,6 +89,8 @@ class Discrete(np.ndarray):
         return np.array_equal(self, other) and (
             not hasattr(other, "unknowns") or self.unknowns == other.unknowns)
 
+    def __ne__(self, other):
+        return not self == other
 
     def __getitem__(self, index):
         if isinstance(index, str):
@@ -287,9 +290,9 @@ def class_distribution(data):
 
 def get_distribution(dat, variable, unknowns=None):
     variable = _get_variable(dat, variable)
-    if isinstance(variable, data.DiscreteVariable):
+    if variable.is_discrete:
         return Discrete(dat, variable, unknowns)
-    elif isinstance(variable, data.ContinuousVariable):
+    elif variable.is_continuous:
         return Continuous(dat, variable, unknowns)
     else:
         raise TypeError("cannot compute distribution of '%s'" %
@@ -301,11 +304,9 @@ def get_distributions(dat, skipDiscrete=False, skipContinuous=False):
     if skipDiscrete:
         if skipContinuous:
             return []
-        columns = [i for i, var in enumerate(vars)
-                   if isinstance(var, data.ContinuousVariable)]
+        columns = [i for i, var in enumerate(vars) if var.is_continuous]
     elif skipContinuous:
-        columns = [i for i, var in enumerate(vars)
-                   if isinstance(var, data.DiscreteVariable)]
+        columns = [i for i, var in enumerate(vars) if var.is_discrete]
     else:
         columns = None
     try:

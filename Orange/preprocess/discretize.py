@@ -1,6 +1,6 @@
 import numpy as np
 
-from Orange.data import ContinuousVariable, DiscreteVariable, Domain
+from Orange.data import DiscreteVariable, Domain
 from Orange.data.sql.table import SqlTable
 from Orange.statistics import distribution, contingency
 from .transformation import Transformation
@@ -47,20 +47,34 @@ class Discretizer(Transformation):
             values = [
                 cls._fmt_interval(low, high, var.number_of_decimals)
                 for low, high in zip([-np.inf] + lpoints, lpoints + [np.inf])]
-
-            def discretized_attribute():
-                return 'bin(%s, ARRAY%s)' % (var.to_sql(), str(lpoints))
+            to_sql = BinSql(var, lpoints)
         else:
             values = ["single_value"]
+            to_sql = SingleValueSql(values[0])
 
-            def discretized_attribute():
-                return "'%s'" % values[0]
-
-        dvar = DiscreteVariable(name="D_" + var.name, values=values)
-        dvar.compute_value = cls(var, points)
+        dvar = DiscreteVariable(name="D_" + var.name, values=values,
+                                compute_value=cls(var, points))
         dvar.source_variable = var
-        dvar.to_sql = discretized_attribute
+        dvar.to_sql = to_sql
         return dvar
+
+
+class BinSql:
+    def __init__(self, var, points):
+        self.var = var
+        self.points = points
+
+    def __call__(self):
+        return 'width_bucket(%s, ARRAY%s::double precision[])' % (
+            self.var.to_sql(), str(self.points))
+
+
+class SingleValueSql:
+    def __init__(self, value):
+        self.value = value
+
+    def __call__(self):
+        return "'%s'" % self.value
 
 
 class Discretization:
@@ -399,7 +413,7 @@ class DomainDiscretizer:
         def transform_list(s, fixed=None):
             new_vars = []
             for var in s:
-                if isinstance(var, ContinuousVariable):
+                if var.is_continuous:
                     if fixed and var.name in fixed.keys():
                         nv = method(data, var, fixed)
                     else:

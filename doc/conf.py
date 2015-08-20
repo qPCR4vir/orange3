@@ -20,6 +20,7 @@ import sys
 # add these directories to sys.path here. If the directory is relative to the
 # documentation root, use os.path.abspath to make it absolute, like shown here.
 sys.path.insert(0, os.path.abspath('..'))
+sys.path.append(os.path.abspath('.'))
 
 # -- General configuration ----------------------------------------------------
 
@@ -39,7 +40,8 @@ autodoc_member_order = "bysource"
 templates_path = ['templates']
 
 # The suffix of source filenames.
-source_suffix = '.rst'
+source_suffix = [".rst", ".md"]
+source_parsers = {".md": "orange_extras.CommonMarkParser"}
 
 # The encoding of source files.
 #source_encoding = 'utf-8-sig'

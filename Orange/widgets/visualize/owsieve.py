@@ -10,7 +10,7 @@ from PyQt4.QtGui import (QGraphicsScene, QGraphicsView, QColor, QPen, QBrush,
 
 
 import Orange
-from Orange.data import Table, ContinuousVariable, DiscreteVariable
+from Orange.data import Table
 from Orange.data.sql.table import SqlTable, LARGE_TABLE, DEFAULT_SAMPLE_TIME
 from Orange.statistics.contingency import get_contingency
 from Orange.widgets import gui
@@ -18,6 +18,7 @@ from Orange.widgets.utils import getHtmlCompatibleString
 from Orange.widgets.visualize.owmosaic import (OWCanvasText, OWCanvasRectangle,
                                                OWCanvasEllipse, OWCanvasLine)
 from Orange.widgets.widget import OWWidget, Default, AttributeList
+from Orange.widgets.io import FileFormats
 
 
 class OWSieveDiagram(OWWidget):
@@ -33,6 +34,9 @@ class OWSieveDiagram(OWWidget):
     outputs = []
 
     settingsList = ["showLines", "showCases", "showInColor"]
+
+    want_graph = True
+
     def __init__(self,parent=None, signalManager = None):
         OWWidget.__init__(self, parent, signalManager, "Sieve diagram", True)
 
@@ -72,9 +76,9 @@ class OWSieveDiagram(OWWidget):
         gui.separator(self.controlArea)
 
         box2 = gui.widgetBox(self.controlArea, box = "Visual settings")
-        gui.checkBox(box2, self, "showLines", "Show lines", callback = self.updateGraph)
+        gui.checkBox(box2, self, "showLines", "Show squares (observed frequency)", callback = self.updateGraph)
         hbox = gui.widgetBox(box2, orientation = "horizontal")
-        gui.checkBox(hbox, self, "showCases", "Show data examples...", callback = self.updateGraph)
+        gui.checkBox(hbox, self, "showCases", "Show data instances...", callback = self.updateGraph)
         gui.checkBox(hbox, self, "showInColor", "...in color", callback = self.updateGraph)
 
         gui.separator(self.controlArea)
@@ -89,6 +93,7 @@ class OWSieveDiagram(OWWidget):
         self.icons = gui.attributeIconDict
         self.resize(800, 550)
         random.seed()
+        self.graphButton.clicked.connect(self.save_graph)
 
     def sendReport(self):
         self.startReport("%s [%s, %s]" % (self.windowTitle(), self.attrX, self.attrY))
@@ -109,14 +114,14 @@ class OWSieveDiagram(OWWidget):
         # self.data = self.optimizationDlg.setData(data, 0)
         self.data = data
 
-        self.warning(0, "")
-        if data:
-            if any(isinstance(attr, ContinuousVariable) for attr in data.domain):
-                self.warning(0, "Data contains continuous variables. " +
-                             "Discretize the data to use them.")
-
         if not sameDomain:
             self.initCombos()
+
+        self.warning(0, "")
+        if data:
+            if any(attr.is_continuous for attr in data.domain):
+                self.warning(0, "Data contains continuous variables. " +
+                             "Discretize the data to use them.")
 
         self.setShownAttributes(self.attributeSelectionList)
 
@@ -175,7 +180,7 @@ class OWSieveDiagram(OWWidget):
 
         if not self.data: return
         for i, var in enumerate(self.data.domain):
-            if isinstance(var, DiscreteVariable):
+            if var.is_discrete:
                 self.attrXCombo.addItem(self.icons[self.data.domain[i]], self.data.domain[i].name)
                 self.attrYCombo.addItem(self.icons[self.data.domain[i]], self.data.domain[i].name)
                 self.attrConditionCombo.addItem(self.icons[self.data.domain[i]], self.data.domain[i].name)
@@ -184,6 +189,9 @@ class OWSieveDiagram(OWWidget):
         if self.attrXCombo.count() > 0:
             self.attrX = str(self.attrXCombo.itemText(0))
             self.attrY = str(self.attrYCombo.itemText(self.attrYCombo.count() > 1))
+        else:
+            self.attrX = None
+            self.attrY = None
 
     def resizeEvent(self, e):
         OWWidget.resizeEvent(self,e)
@@ -247,11 +255,18 @@ class OWSieveDiagram(OWWidget):
                     actualProb = 0
                 probs['%s-%s' %(data.domain[self.attrX].values[i], data.domain[self.attrY].values[j])] = ((data.domain[self.attrX].values[i], valx), (data.domain[self.attrY].values[j], valy), actualProb, len(data))
 
+        #get text width of Y labels
+        max_ylabel_w = 0
+        for j in range(len(valsY)):
+            xl = OWCanvasText(self.canvas, "", 0, 0, htmlText = getHtmlCompatibleString(data.domain[self.attrY].values[j]), show=False)
+            max_ylabel_w = max(int(xl.boundingRect().width()), max_ylabel_w)
+        max_ylabel_w = min(max_ylabel_w, 200) #upper limit for label widths
+
         # get text width of Y attribute name
         text = OWCanvasText(self.canvas, data.domain[self.attrY].name, x  = 0, y = 0, bold = 1, show = 0, vertical=True)
-        xOff = int(text.boundingRect().height() + 40)
-        yOff = 50
-        sqareSize = min(self.canvasView.width() - xOff - 35, self.canvasView.height() - yOff - 30)
+        xOff = int(text.boundingRect().height() + max_ylabel_w)
+        yOff = 55
+        sqareSize = min(self.canvasView.width() - xOff - 35, self.canvasView.height() - yOff - 50)
         if sqareSize < 0: return    # canvas is too small to draw rectangles
         self.canvasView.setSceneRect(0, 0, self.canvasView.width(), self.canvasView.height())
 
@@ -277,14 +292,14 @@ class OWSieveDiagram(OWWidget):
         ######################
         # draw rectangles
         currX = xOff
-        max_ylabel_w = 0
+        max_xlabel_h = 0
 
         normX, normY = sum(valsX), sum(valsY)
         for i in range(len(valsX)):
             if valsX[i] == 0: continue
             currY = yOff
             width = int(float(sqareSize * valsX[i])/float(normX))
-            
+
             #for j in range(len(valsY)):
             for j in range(len(valsY)-1, -1, -1):   # this way we sort y values correctly
                 ((xAttr, xVal), (yAttr, yVal), actual, sum_) = probs['%s-%s' %(data.domain[self.attrX].values[i], data.domain[self.attrY].values[j])]
@@ -297,23 +312,24 @@ class OWSieveDiagram(OWWidget):
 
                 expected = float(xVal*yVal)/float(sum_)
                 pearson = (actual - expected) / sqrt(expected)
-                tooltipText = """<b>X Attribute: %s</b><br>Value: <b>%s</b><br>Number of examples (p(x)): <b>%d (%.2f%%)</b><hr>
-                                <b>Y Attribute: %s</b><br>Value: <b>%s</b><br>Number of examples (p(y)): <b>%d (%.2f%%)</b><hr>
-                                <b>Number Of Examples (Probabilities):</b><br>Expected (p(x)p(y)): <b>%.1f (%.2f%%)</b><br>Actual (p(x,y)): <b>%d (%.2f%%)</b>
+                tooltipText = """<b>X Attribute: %s</b><br>Value: <b>%s</b><br>Number of instances (p(x)): <b>%d (%.2f%%)</b><hr>
+                                <b>Y Attribute: %s</b><br>Value: <b>%s</b><br>Number of instances (p(y)): <b>%d (%.2f%%)</b><hr>
+                                <b>Number Of Instances (Probabilities):</b><br>Expected (p(x)p(y)): <b>%.1f (%.2f%%)</b><br>Actual (p(x,y)): <b>%d (%.2f%%)</b>
                                 <hr><b>Statistics:</b><br>Chi-square: <b>%.2f</b><br>Standardized Pearson residual: <b>%.2f</b>""" %(self.attrX, getHtmlCompatibleString(xAttr), xVal, 100.0*float(xVal)/float(sum_), self.attrY, getHtmlCompatibleString(yAttr), yVal, 100.0*float(yVal)/float(sum_), expected, 100.0*float(xVal*yVal)/float(sum_*sum_), actual, 100.0*float(actual)/float(sum_), chisquare, pearson )
                 rect.setToolTip(tooltipText)
 
                 currY += height
                 if currX == xOff:
-                    xl = OWCanvasText(self.canvas, "", xOff - 10, currY - height/2, Qt.AlignRight | Qt.AlignVCenter, htmlText = getHtmlCompatibleString(data.domain[self.attrY].values[j]))
-                    max_ylabel_w = max(int(xl.boundingRect().width()), max_ylabel_w)
+                    OWCanvasText(self.canvas, "", xOff, currY - height/2, Qt.AlignRight | Qt.AlignVCenter, htmlText = getHtmlCompatibleString(data.domain[self.attrY].values[j]))
 
-            OWCanvasText(self.canvas, "", currX + width/2, yOff + sqareSize + 5, Qt.AlignCenter, htmlText = getHtmlCompatibleString(data.domain[self.attrX].values[i]))
+            xl = OWCanvasText(self.canvas, "", currX + width/2, yOff + sqareSize, Qt.AlignHCenter | Qt.AlignTop, htmlText = getHtmlCompatibleString(data.domain[self.attrX].values[i]))
+            max_xlabel_h = max(int(xl.boundingRect().height()), max_xlabel_h)
+
             currX += width
 
         # show attribute names
-        OWCanvasText(self.canvas, self.attrY, max(xOff-20-max_ylabel_w, 20), yOff + sqareSize/2, Qt.AlignRight | Qt.AlignVCenter, bold = 1, vertical=True)
-        OWCanvasText(self.canvas, self.attrX, xOff + sqareSize/2, yOff + sqareSize + 15, Qt.AlignCenter, bold = 1)
+        OWCanvasText(self.canvas, self.attrY, 0, yOff + sqareSize/2, Qt.AlignLeft | Qt.AlignVCenter, bold = 1, vertical=True)
+        OWCanvasText(self.canvas, self.attrX, xOff + sqareSize/2, yOff + sqareSize + max_xlabel_h, Qt.AlignHCenter | Qt.AlignTop, bold = 1)
 
         #self.canvas.update()
 
@@ -421,6 +437,13 @@ class OWSieveDiagram(OWWidget):
     def closeEvent(self, ce):
         # self.optimizationDlg.hide()
         QDialog.closeEvent(self, ce)
+
+    def save_graph(self):
+        from Orange.widgets.data.owsave import OWSave
+
+        save_img = OWSave(parent=self, data=self.canvas,
+                          file_formats=FileFormats.img_writers)
+        save_img.exec_()
 
 # class OWSieveOptimization(OWMosaicOptimization, orngMosaic):
 #     settingsList = ["percentDataUsed", "ignoreTooSmallCells",

@@ -14,8 +14,7 @@ import builtins
 import math
 import random
 from collections import namedtuple, Counter
-
-
+from itertools import chain
 from PyQt4 import QtGui, QtCore
 from PyQt4.QtGui import QSizePolicy
 from PyQt4.QtCore import Qt, QEvent, pyqtSignal as Signal, pyqtProperty as Property
@@ -27,7 +26,6 @@ from Orange.widgets.settings import DomainContextHandler, Setting, ContextSettin
 from Orange.widgets.utils import itemmodels, vartype
 
 from .owpythonscript import PythonSyntaxHighlighter
-
 
 FeatureDescriptor = \
     namedtuple("FeatureDescriptor", ["name", "expression"])
@@ -43,35 +41,28 @@ StringDescriptor = namedtuple("StringDescriptor", ["name", "expression"])
 
 
 @functools.lru_cache(50)
-def make_variable(descriptor):
-
-    if descriptor.expression.strip():
-        compute_value = \
-            lambda instance: eval(descriptor.expression,
-                                  {"instance": instance, "_": instance})
-    else:
-        compute_value = lambda _: float("nan")
+def make_variable(descriptor, compute_value=None):
+    if compute_value is None:
+        if descriptor.expression.strip():
+            compute_value = \
+                lambda instance: eval(descriptor.expression,
+                                      {"instance": instance, "_": instance})
+        else:
+            compute_value = lambda _: float("nan")
 
     if isinstance(descriptor, ContinuousDescriptor):
-        var = Orange.data.ContinuousVariable(descriptor.name)
-        var.number_of_decimals = descriptor.number_of_decimals
-        var.compute_value = compute_value
-        return var
+        return Orange.data.ContinuousVariable(descriptor.name, descriptor.number_of_decimals, compute_value)
     elif isinstance(descriptor, DiscreteDescriptor):
-        var = Orange.data.DiscreteVariable(
+        return Orange.data.DiscreteVariable(
             descriptor.name,
             values=descriptor.values,
             ordered=descriptor.ordered,
-            base_value=descriptor.base_value
-        )
-        var.compute_value = compute_value
-        return var
+            base_value=descriptor.base_value,
+            compute_value=compute_value)
     elif isinstance(descriptor, StringDescriptor):
-        var = Orange.data.StringVariable(
+        return Orange.data.StringVariable(
             descriptor.name,
-        )
-        var.compute_value = compute_value
-        return var
+            compute_value=compute_value)
     else:
         raise TypeError
 
@@ -200,6 +191,9 @@ def selected_row(view):
 
 
 class FeatureEditor(QtGui.QFrame):
+    FUNCTIONS = dict(chain([(key, val) for key, val in math.__dict__.items()
+                            if not key.startswith("_")],
+                           [("str", str)]))
     featureChanged = Signal()
     featureEdited = Signal()
 
@@ -215,16 +209,35 @@ class FeatureEditor(QtGui.QFrame):
             sizePolicy=QSizePolicy(QSizePolicy.Minimum,
                                    QSizePolicy.Fixed)
         )
-        self.expressionedit = QtGui.QPlainTextEdit(
-            tabChangesFocus=True,
-        )
-        high = PythonSyntaxHighlighter(self.expressionedit.document())
+        self.expressionedit = QtGui.QLineEdit()
+
+        self.attrs_model = itemmodels.VariableListModel(["Select feature"])
+        self.attributescb = QtGui.QComboBox()
+        self.attributescb.setModel(self.attrs_model)
+
+        sorted_funcs = sorted(self.FUNCTIONS)
+        self.funcs_model = itemmodels.PyListModelTooltip()
+        self.funcs_model[:] = chain(["Select function"], sorted_funcs)
+        self.funcs_model.tooltips[:] = chain(
+            [''],
+            [self.FUNCTIONS[func].__doc__ for func in sorted_funcs])
+
+        self.functionscb = QtGui.QComboBox()
+        self.functionscb.setModel(self.funcs_model)
+
+        hbox = QtGui.QHBoxLayout()
+        hbox.addWidget(self.attributescb)
+        hbox.addWidget(self.functionscb)
+
         layout.addRow(self.tr("Name"), self.nameedit)
         layout.addRow(self.tr("Expression"), self.expressionedit)
+        layout.addRow(self.tr(""), hbox)
         self.setLayout(layout)
 
         self.nameedit.editingFinished.connect(self._invalidate)
         self.expressionedit.textChanged.connect(self._invalidate)
+        self.attributescb.currentIndexChanged.connect(self.on_attrs_changed)
+        self.functionscb.currentIndexChanged.connect(self.on_funcs_changed)
 
         self._modified = False
 
@@ -243,20 +256,54 @@ class FeatureEditor(QtGui.QFrame):
     modified = Property(bool, modified, setModified,
                         notify=modifiedChanged)
 
-    def setEditorData(self, data):
+    def setEditorData(self, data, domain):
         self.nameedit.setText(data.name)
-        self.expressionedit.setPlainText(data.expression)
+        self.expressionedit.setText(data.expression)
         self.setModified(False)
         self.featureChanged.emit()
+        self.attrs_model[:] = ["Select feature"]
+        if domain:
+            self.attrs_model[:] += chain(domain.attributes,
+                                         domain.class_vars,
+                                         domain.metas)
 
     def editorData(self):
         return FeatureDescriptor(name=self.nameedit.text(),
-                                 expression=self.nameedit.toPlainText())
+                                 expression=self.nameedit.text())
 
     def _invalidate(self):
         self.setModified(True)
         self.featureEdited.emit()
         self.featureChanged.emit()
+
+    def on_attrs_changed(self):
+        index = self.attributescb.currentIndex()
+        if index > 0:
+            attr = sanitized_name(self.attrs_model[index].name)
+            self.insert_into_expression(attr)
+            self.attributescb.setCurrentIndex(0)
+
+    def on_funcs_changed(self):
+        index = self.functionscb.currentIndex()
+        if index > 0:
+            func = self.funcs_model[index]
+            if func in ["atan2", "fmod", "ldexp", "log",
+                        "pow", "copysign", "hypot"]:
+                self.insert_into_expression(func + "(,)")
+                self.expressionedit.cursorBackward(False, 2)
+            elif func in ["e", "pi"]:
+                self.insert_into_expression(func)
+            else:
+                self.insert_into_expression(func + "()")
+                self.expressionedit.cursorBackward(False)
+            self.functionscb.setCurrentIndex(0)
+
+    def insert_into_expression(self, what):
+        cp = self.expressionedit.cursorPosition()
+        ct = self.expressionedit.text()
+        text = ct[:cp] + what + ct[cp:]
+        self.expressionedit.setText(text)
+        self.expressionedit.setFocus()
 
 
 class ContinuousFeatureEditor(FeatureEditor):
@@ -270,15 +317,15 @@ class ContinuousFeatureEditor(FeatureEditor):
         self.setTabOrder(self.nameedit, self.ndecimalsedit)
         self.setTabOrder(self.ndecimalsedit, self.expressionedit)
 
-    def setEditorData(self, data):
+    def setEditorData(self, data, domain):
         self.ndecimalsedit.setValue(data.number_of_decimals)
-        super().setEditorData(data)
+        super().setEditorData(data, domain)
 
     def editorData(self):
         return ContinuousDescriptor(
             name=self.nameedit.text(),
             number_of_decimals=self.ndecimalsedit.value(),
-            expression=self.expressionedit.toPlainText()
+            expression=self.expressionedit.text()
         )
 
 
@@ -310,8 +357,8 @@ class DiscreteFeatureEditor(FeatureEditor):
         removeaction = QtGui.QAction(
             unicodedata.lookup("MINUS SIGN"), toolbar,
             toolTip="Remove selected value",
-#             shortcut=QtGui.QKeySequence.Delete,
-#             shortcutContext=Qt.WidgetShortcut
+            #             shortcut=QtGui.QKeySequence.Delete,
+            #             shortcutContext=Qt.WidgetShortcut
         )
         removeaction.triggered.connect(self.removeValue)
 
@@ -343,10 +390,10 @@ class DiscreteFeatureEditor(FeatureEditor):
         self.setTabOrder(self.baseedit, self.orderededit)
         self.setTabOrder(self.orderededit, self.expressionedit)
 
-    def setEditorData(self, data):
+    def setEditorData(self, data, domain):
         self.valuesmodel[:] = data.values
         self.baseedit.setCurrentIndex(data.base_value)
-        super().setEditorData(data)
+        super().setEditorData(data, domain)
 
     def editorData(self):
         return DiscreteDescriptor(
@@ -354,7 +401,7 @@ class DiscreteFeatureEditor(FeatureEditor):
             values=tuple(self.valuesmodel),
             base_value=self.baseedit.currentIndex(),
             ordered=self.orderededit.isChecked(),
-            expression=self.expressionedit.toPlainText()
+            expression=self.expressionedit.text()
         )
 
     def addValue(self, name=None):
@@ -376,7 +423,7 @@ class StringFeatureEditor(FeatureEditor):
     def editorData(self):
         return StringDescriptor(
             name=self.nameedit.text(),
-            expression=self.expressionedit.toPlainText()
+            expression=self.expressionedit.text()
         )
 
 
@@ -397,7 +444,6 @@ def variable_icon(dtype):
 
 
 class FeatureItemDelegate(QtGui.QStyledItemDelegate):
-
     def displayText(self, value, locale):
         return value.name + " := " + value.expression
 
@@ -441,7 +487,7 @@ class OWFeatureConstructor(widget.OWWidget):
 
     def __init__(self):
         super().__init__()
-
+        self.data = None
         self.editors = {}
 
         box = QtGui.QGroupBox(
@@ -501,8 +547,8 @@ class OWFeatureConstructor(widget.OWWidget):
         self.removeaction = QtGui.QAction(
             unicodedata.lookup("MINUS SIGN"), self,
             toolTip="Remove selected feature",
-#             shortcut=QtGui.QKeySequence.Delete,
-#             shortcutContext=Qt.WidgetShortcut
+            #             shortcut=QtGui.QKeySequence.Delete,
+            #             shortcutContext=Qt.WidgetShortcut
         )
         self.removeaction.triggered.connect(self.removeSelectedFeature)
         self.featuretoolbar.addAction(self.addaction)
@@ -539,8 +585,8 @@ class OWFeatureConstructor(widget.OWWidget):
             desc = self.featuremodel[min(index, len(self.featuremodel) - 1)]
             editor = self.editors[type(desc)]
             self.editorstack.setCurrentWidget(editor)
-            editor.setEditorData(desc)
-
+            editor.setEditorData(desc,
+                                 self.data.domain if self.data else None)
         self.editorstack.setEnabled(index >= 0)
         self.duplicateaction.setEnabled(index >= 0)
         self.removeaction.setEnabled(index >= 0)
@@ -612,7 +658,18 @@ class OWFeatureConstructor(widget.OWWidget):
         desc = self.featuremodel[self.currentIndex]
         self.addFeature(copy.deepcopy(desc))
 
+    def check_attrs_values(self, attr, data):
+        for i in range(len(data)):
+            for var in attr:
+                if not math.isnan(data[i, var]) \
+                        and int(data[i, var]) >= len(var.values):
+                    return var.name
+        return None
+
     def apply(self):
+        if self.data is None:
+            return
+
         desc = list(self.featuremodel)
 
         def remove_invalid_expression(desc):
@@ -630,7 +687,22 @@ class OWFeatureConstructor(widget.OWWidget):
             self.data.domain.class_vars,
             metas=self.data.domain.metas + tuple(metas)
         )
-        data = Orange.data.Table(new_domain, self.data)
+
+        self.error(0)
+        try:
+            data = Orange.data.Table(new_domain, self.data)
+        except Exception as err:
+            self.error(0, repr(err.args[0]))
+            return
+
+        self.error(1)
+        disc_attrs_not_ok = self.check_attrs_values(
+            [var for var in attrs if var.is_discrete], data)
+        if disc_attrs_not_ok:
+            self.error(1, 'Discrete variable %s needs more values.' %
+                       disc_attrs_not_ok)
+            return
+
         self.send("Data", data)
 
 
@@ -688,12 +760,12 @@ def freevars(exp, env):
     elif etype == ast.Call:
         return sum((freevars(e, env)
                     for e in [exp.func] + (exp.args or []) +
-                             (exp.keywords or []) +
-                             (exp.starargs or []) +
-                             (exp.kwargs or [])),
+                    (exp.keywords or []) +
+                    (exp.starargs or []) +
+                    (exp.kwargs or [])),
                    [])
     elif etype in [ast.Num, ast.Str, ast.Ellipsis]:
-#     elif etype in [ast.Num, ast.Str, ast.Ellipsis, ast.Bytes]:
+        #     elif etype in [ast.Num, ast.Str, ast.Ellipsis, ast.Bytes]:
         return []
     elif etype == ast.Attribute:
         return freevars(exp.value, env)
@@ -718,12 +790,11 @@ def freevars(exp, env):
 
 
 def construct_variables(descriptions, source_vars):
-    #subs
+    # subs
     variables = []
     for desc in descriptions:
         _, func = bind_variable(desc, source_vars)
-        var = make_variable(desc)
-        var.compute_value = func
+        var = make_variable(desc, func)
         variables.append(var)
     return variables
 
@@ -788,7 +859,6 @@ __ALLOWED = [
 __GLOBALS = {name: getattr(builtins, name) for name in __ALLOWED
              if hasattr(builtins, name)}
 
-
 __GLOBALS.update({name: getattr(math, name) for name in dir(math)
                   if not name.startswith("_")})
 
@@ -807,7 +877,7 @@ __GLOBALS.update({
 )
 
 
-class FeatureFunc(object):
+class FeatureFunc:
     def __init__(self, expression, args):
         self.expression = expression
         self.args = args

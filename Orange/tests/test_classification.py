@@ -1,14 +1,17 @@
 import inspect
 import os
+import pickle
 import pkgutil
 import unittest
 
 import numpy as np
+import traceback
+from Orange.base import SklLearner
 
 import Orange.classification
 from Orange.classification import (
     Learner, Model, NaiveBayesLearner, LogisticRegressionLearner)
-from Orange.data import DiscreteVariable, Domain, Table
+from Orange.data import DiscreteVariable, Domain, Table, Variable
 from Orange.data.io import BasketFormat
 from Orange.evaluation import CrossValidation
 from Orange.tests.dummy_learners import DummyLearner, DummyMulticlassLearner
@@ -55,6 +58,11 @@ class ModelTest(unittest.TestCase):
         pred = []
         for row in table:
             pred.append(clf(row))
+
+    def test_learner_adequacy(self):
+        table = Table("housing")
+        learner = NaiveBayesLearner()
+        self.assertRaises(ValueError, learner, table)
 
     def test_value_from_probs(self):
         nrows = 100
@@ -176,9 +184,33 @@ class SklTest(unittest.TestCase):
         self.assertEqual(len(res.models[0][0].domain.attributes), 2)
         self.assertGreater(Orange.evaluation.CA(res)[0], 0.8)
 
+    def test_params(self):
+        learner = SklLearner()
+        self.assertIsInstance(learner.params, dict)
+
+
+class ClassfierListInputTest(unittest.TestCase):
+    def test_discrete(self):
+        table = Table("titanic")
+        tree = Orange.classification.TreeLearner()(table)
+        strlist = [ [ "crew", "adult", "male" ],
+                    [ "crew", "adult", None ] ]
+        for se in strlist: #individual examples
+            assert(all(tree(se) == tree(Orange.data.Table(table.domain, [se]))))
+        assert(all(tree(strlist) == tree(Orange.data.Table(table.domain, strlist))))
+
+    def test_continuous(lf):
+        table = Table("iris")
+        tree = Orange.classification.TreeLearner()(table)
+        strlist = [ [ 2, 3, 4, 5 ],
+                    [ 1, 2, 3, 5 ] ]
+        for se in strlist: #individual examples
+            assert(all(tree(se) == tree(Orange.data.Table(table.domain, [se]))))
+        assert(all(tree(strlist) == tree(Orange.data.Table(table.domain, strlist))))
+
 
 class LearnerAccessibility(unittest.TestCase):
-    def test_all_learners_accessible_in_Orange_classification_namespace(self):
+    def all_learners(self):
         classification_modules = pkgutil.walk_packages(
             path=Orange.classification.__path__,
             prefix="Orange.classification.",
@@ -190,7 +222,42 @@ class LearnerAccessibility(unittest.TestCase):
                 continue
 
             for name, class_ in inspect.getmembers(module, inspect.isclass):
-                if issubclass(class_, Learner):
-                    if not hasattr(Orange.classification, class_.__name__):
-                        self.fail("%s is not visible in Orange.classification"
-                                  " namespace" % class_.__name__)
+                if issubclass(class_, Learner) and 'base' not in class_.__module__:
+                    yield class_
+
+    def test_all_learners_accessible_in_Orange_classification_namespace(self):
+        for learner in self.all_learners():
+            if not hasattr(Orange.classification, learner.__name__):
+                self.fail("%s is not visible in Orange.classification"
+                          " namespace" % learner.__name__)
+
+    def test_all_models_work_after_unpickling(self):
+        Variable._clear_all_caches()
+        datasets = [Table('iris'), Table('titanic')]
+        for learner in list(self.all_learners()):
+            try:
+                learner = learner()
+            except Exception as err:
+                print('%s cannot be used with default parameters' % learner.__name__)
+                traceback.print_exc()
+                continue
+
+            for ds in datasets:
+                model = learner(ds)
+                s = pickle.dumps(model, 0)
+                model2 = pickle.loads(s)
+
+                np.testing.assert_almost_equal(Table(model.domain, ds).X, Table(model2.domain, ds).X)
+                np.testing.assert_almost_equal(model(ds), model2(ds),
+                                               err_msg='%s does not return same values when unpickled %s' % (learner.__class__.__name__, ds.name))
+                #print('%s on %s works' % (learner, ds.name))
+
+    def test_adequacy_all_learners(self):
+        for learner in self.all_learners():
+            try:
+                learner = learner()
+                table = Table("housing")
+                self.assertRaises(ValueError, learner, table)
+            except TypeError as err:
+                traceback.print_exc()
+                continue

@@ -1,21 +1,21 @@
 import numpy as np
 from scipy import stats, sparse
 import sklearn.metrics as skl_metrics
-import sklearn.preprocessing as skl_preprocessing
 
 from Orange import data
 from Orange.misc import DistMatrix
+from Orange.preprocess import SklImpute
 
 
 def _preprocess(table):
     """Remove categorical attributes and impute missing values."""
-    new_domain = data.Domain([i for i in table.domain.attributes
-                              if isinstance(i, data.ContinuousVariable)],
-                             table.domain.class_var,
+    if not len(table):
+        return table
+    new_domain = data.Domain([a for a in table.domain.attributes if a.is_continuous],
+                             table.domain.class_vars,
                              table.domain.metas)
     new_data = data.Table(new_domain, table)
-    new_data.X = skl_preprocessing.Imputer().fit_transform(new_data.X)
-    new_data.X = new_data.X if sparse.issparse(new_data.X) else np.squeeze(new_data.X)
+    new_data = SklImpute(new_data)
     return new_data
 
 
@@ -30,7 +30,7 @@ def _orange_to_numpy(x):
 
 
 class Distance():
-    def __call__(self, e1, e2=None, axis=1):
+    def __call__(self, e1, e2=None, axis=1, impute=False):
         """
         :param e1: input data instances, we calculate distances between all pairs
         :type e1: :class:`Orange.data.Table` or :class:`Orange.data.RowInstance` or :class:`numpy.ndarray`
@@ -40,6 +40,8 @@ class Distance():
         :param axis: if axis=1 we calculate distances between rows,
            if axis=0 we calculate distances between columns
         :type axis: int
+        :param impute: if impute=True all NaN values in matrix are replaced with 0
+        :type impute: bool
         :return: the matrix with distances between given examples
         :rtype: :class:`Orange.misc.distmatrix.DistMatrix`
         """
@@ -55,7 +57,7 @@ class SklDistance(Distance):
         """
         self.metric = metric
 
-    def __call__(self, e1, e2=None, axis=1):
+    def __call__(self, e1, e2=None, axis=1, impute=False):
         x1 = _orange_to_numpy(e1)
         x2 = _orange_to_numpy(e2)
         if axis == 0:
@@ -90,7 +92,7 @@ class SpearmanDistance(Distance):
         """
         self.absolute = absolute
 
-    def __call__(self, e1, e2=None, axis=1):
+    def __call__(self, e1, e2=None, axis=1, impute=False):
         x1 = _orange_to_numpy(e1)
         x2 = _orange_to_numpy(e2)
         if x2 is None:
@@ -108,6 +110,8 @@ class SpearmanDistance(Distance):
             slc = len(e1) if x1.ndim > 1 else 1
             transpose = True
         rho, _ = stats.spearmanr(x1, x2, axis=axis)
+        if np.isnan(rho).any() and impute:
+            rho = np.nan_to_num(rho)
         if self.absolute:
             dist = (1. - np.abs(rho)) / 2.
         else:
@@ -139,7 +143,7 @@ class PearsonDistance(Distance):
         """
         self.absolute = absolute
 
-    def __call__(self, e1, e2=None, axis=1):
+    def __call__(self, e1, e2=None, axis=1, impute=False):
         x1 = _orange_to_numpy(e1)
         x2 = _orange_to_numpy(e2)
         if x2 is None:
@@ -152,6 +156,8 @@ class PearsonDistance(Distance):
         if x2.ndim == 1:
             x2 = list([x2])
         rho = np.array([[stats.pearsonr(i, j)[0] for j in x2] for i in x1])
+        if np.isnan(rho).any() and impute:
+            rho = np.nan_to_num(rho)
         if self.absolute:
             dist = (1. - np.abs(rho)) / 2.
         else:

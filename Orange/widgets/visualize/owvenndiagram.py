@@ -28,6 +28,7 @@ import Orange.data
 
 from Orange.widgets import widget, gui, settings
 from Orange.widgets.utils import itemmodels, colorpalette
+from Orange.widgets.io import FileFormats
 
 
 _InputData = namedtuple("_InputData", ["key", "name", "table"])
@@ -52,6 +53,8 @@ class OWVennDiagram(widget.OWWidget):
     #: Use identifier columns for instance matching
     useidentifiers = settings.Setting(True)
     autocommit = settings.Setting(False)
+
+    want_graph = True
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -124,6 +127,7 @@ class OWVennDiagram(widget.OWWidget):
                     max(self.controlArea.sizeHint().height(), 550))
 
         self._queue = []
+        self.graphButton.clicked.connect(self.save_graph)
 
     def setData(self, data, key=None):
         self.error(0)
@@ -554,6 +558,13 @@ class OWVennDiagram(widget.OWWidget):
         self._storeHints()
         return super().getSettings(self, *args, **kwargs)
 
+    def save_graph(self):
+        from Orange.widgets.data.owsave import OWSave
+
+        save_img = OWSave(parent=self, data=self.scene,
+                          file_formats=FileFormats.img_writers)
+        save_img.exec_()
+
 
 def pairwise(iterable):
     """
@@ -649,7 +660,7 @@ def copy_descriptor(descriptor, newname=None):
     if newname is None:
         newname = descriptor.name
 
-    if isinstance(descriptor, Orange.data.DiscreteVariable):
+    if descriptor.is_discrete:
         newf = Orange.data.DiscreteVariable(
             newname,
             values=descriptor.values,
@@ -658,7 +669,7 @@ def copy_descriptor(descriptor, newname=None):
         )
         newf.attributes = dict(descriptor.attributes)
 
-    elif isinstance(descriptor, Orange.data.ContinuousVariable):
+    elif descriptor.is_continuous:
         newf = Orange.data.ContinuousVariable(newname)
         newf.number_of_decimals = descriptor.number_of_decimals
         newf.attributes = dict(descriptor.attributes)
@@ -807,7 +818,7 @@ def varying_between(table, idvarlist):
             values = subset[:, var]
             values, _ = subset.get_column_view(var)
 
-            if isinstance(var, Orange.data.StringVariable):
+            if var.is_string:
                 uniq = set(values)
             else:
                 uniq = unique_non_nan(values)
@@ -847,7 +858,7 @@ def string_attributes(domain):
     Return all string attributes from the domain.
     """
     return [attr for attr in domain.variables + domain.metas
-            if isinstance(attr, Orange.data.StringVariable)]
+            if attr.is_string]
 
 
 def discrete_attributes(domain):
@@ -855,7 +866,7 @@ def discrete_attributes(domain):
     Return all discrete attributes from the domain.
     """
     return [attr for attr in domain.variables + domain.metas
-            if isinstance(attr, Orange.data.DiscreteVariable)]
+                 if attr.is_discrete]
 
 
 def source_attributes(domain):

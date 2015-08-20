@@ -11,7 +11,7 @@ VERSION = '3.2'
 ISRELEASED = False
 
 DESCRIPTION = 'Orange, a component-based data mining framework.'
-README_FILE = os.path.join(os.path.dirname(__file__), 'README.txt')
+README_FILE = os.path.join(os.path.dirname(__file__), 'README.md')
 LONG_DESCRIPTION = open(README_FILE).read()
 AUTHOR = 'Bioinformatics Laboratory, FRI UL'
 AUTHOR_EMAIL = 'contact@orange.biolab.si'
@@ -63,7 +63,11 @@ if len({'develop', 'release', 'bdist_egg', 'bdist_rpm', 'bdist_wininst',
         zip_safe=False,  # the package can run out of an .egg file
         include_package_data=True,
         test_suite='Orange.tests.test_suite',
-        install_requires=INSTALL_REQUIRES
+        install_requires=INSTALL_REQUIRES,
+        entry_points={
+            "orange.canvas.help": (
+                "html-index = Orange.widgets:WIDGET_HELP_PATH",)
+        }
     )
 else:
     extra_setuptools_args = dict()

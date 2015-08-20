@@ -11,7 +11,9 @@ from . import _variable
 ValueUnknown = Unknown  # Shadowing within classes
 
 
-def make_variable(cls, *args):
+def make_variable(cls, compute_value, *args):
+    if compute_value is not None:
+        return cls(*args, compute_value=compute_value)
     return cls.make(*args)
 
 
@@ -67,12 +69,11 @@ class Variable(metaclass=VariableMeta):
         Construct a variable descriptor.
         """
         self.name = name
-        if compute_value is not None:
-            self.compute_value = compute_value
+        self._compute_value = compute_value
         self.unknown_str = set(Variable._DefaultUnknownStr)
         self.source_variable = None
         self.attributes = {}
-        if name:
+        if name and compute_value is None:
             if isinstance(self._all_vars, collections.defaultdict):
                 self._all_vars[name].append(self)
             else:
@@ -114,6 +115,18 @@ class Variable(metaclass=VariableMeta):
         Derived classes must overload the function.
         """
         raise RuntimeError("variable descriptors must overload is_primitive()")
+
+    @property
+    def is_discrete(self):
+        return isinstance(self, DiscreteVariable)
+
+    @property
+    def is_continuous(self):
+        return isinstance(self, ContinuousVariable)
+
+    @property
+    def is_string(self):
+        return isinstance(self, StringVariable)
 
     def repr_val(self, val):
         """
@@ -174,22 +187,18 @@ class Variable(metaclass=VariableMeta):
         """
         return "{}('{}')".format(self.__class__.__name__, self.name)
 
-    @staticmethod
-    def compute_value(_):
-        return Unknown
+    @property
+    def compute_value(self):
+        return self._compute_value
 
     def __reduce__(self):
         if not self.name:
             raise PickleError("Variables without names cannot be pickled")
-        return make_variable, (self.__class__, self.name), self.__dict__
 
-    def __copy__(self):
-        """
-        __copy__ is needed since function copy.copy would otherwise use
-        pickling and returns the same instance."""
-        newvar = type(self)()
-        newvar.__dict__.update(self.__dict__)
-        return newvar
+        return make_variable, (self.__class__, self._compute_value, self.name), self.__dict__
+
+    def copy(self, compute_value):
+        return Variable(self.name, compute_value)
 
 
 class ContinuousVariable(Variable):
@@ -216,12 +225,12 @@ class ContinuousVariable(Variable):
     set to 0 to prevent changes by `to_val`.
     """
 
-    def __init__(self, name="", number_of_decimals=None):
+    def __init__(self, name="", number_of_decimals=None, compute_value=None):
         """
         Construct a new continuous variable. The number of decimals is set to
         three, but adjusted at the first call of :obj:`to_val`.
         """
-        super().__init__(name)
+        super().__init__(name, compute_value)
         if number_of_decimals is None:
             self.number_of_decimals = 3
             self.adjust_decimals = 2
@@ -269,6 +278,9 @@ class ContinuousVariable(Variable):
 
     str_val = repr_val
 
+    def copy(self, compute_value=None):
+        return ContinuousVariable(self.name, self.number_of_decimals, compute_value)
+
 
 class DiscreteVariable(Variable):
     """
@@ -296,9 +308,9 @@ class DiscreteVariable(Variable):
     _all_vars = collections.defaultdict(list)
     presorted_values = []
 
-    def __init__(self, name="", values=(), ordered=False, base_value=-1):
+    def __init__(self, name="", values=(), ordered=False, base_value=-1, compute_value=None):
         """ Construct a discrete variable descriptor with the given values. """
-        super().__init__(name)
+        super().__init__(name, compute_value)
         self.ordered = ordered
         self.values = list(values)
         self.base_value = base_value
@@ -362,6 +374,7 @@ class DiscreteVariable(Variable):
         :type s: str
         :rtype: float
         """
+        s = str(s) if s is not None else s
         try:
             return ValueUnknown if s in self.unknown_str \
                 else self.values.index(s)
@@ -387,7 +400,7 @@ class DiscreteVariable(Variable):
     def __reduce__(self):
         if not self.name:
             raise PickleError("Variables without names cannot be pickled")
-        return make_variable, (self.__class__, self.name,
+        return make_variable, (self.__class__, self._compute_value, self.name,
                                self.values, self.ordered, self.base_value), \
             self.__dict__
 
@@ -500,6 +513,10 @@ class DiscreteVariable(Variable):
                 return presorted
         return sorted(values)
 
+    def copy(self, compute_value=None):
+        return DiscreteVariable(self.name, self.values, self.ordered,
+                                self.base_value, compute_value)
+
 
 class StringVariable(Variable):
     """
@@ -512,10 +529,6 @@ class StringVariable(Variable):
     def is_primitive():
         """Return `False`: string variables are not stored as floats."""
         return False
-
-    @staticmethod
-    def compute_value(_):
-        return None
 
     def to_val(self, s):
         """
@@ -533,6 +546,8 @@ class StringVariable(Variable):
     @staticmethod
     def str_val(val):
         """Return a string representation of the value."""
+        if isinstance(val, Real) and isnan(val):
+            return "?"
         if isinstance(val, Value):
             if val.value is None:
                 return "None"
