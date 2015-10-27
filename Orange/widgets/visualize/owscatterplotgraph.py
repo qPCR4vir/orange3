@@ -1,7 +1,4 @@
-import ctypes
 import itertools
-import os
-import sysconfig
 from xml.sax.saxutils import escape
 from math import log10, floor, ceil
 
@@ -20,6 +17,7 @@ from PyQt4.QtGui import QApplication, QColor, QPen, QBrush, QToolTip
 from PyQt4.QtGui import QStaticText, QPainterPath, QTransform, QPinchGesture, QPainter
 
 from Orange.widgets import gui
+from Orange.widgets.utils import classdensity
 from Orange.widgets.utils.colorpalette import (ColorPaletteGenerator,
                                                ContinuousPaletteGenerator)
 from Orange.widgets.utils.plot import \
@@ -31,7 +29,7 @@ from Orange.widgets.settings import Setting, ContextSetting
 
 # TODO Move utility classes to another module, so they can be used elsewhere
 
-SELECTION_WIDTH = 4
+SELECTION_WIDTH = 5
 
 class PaletteItemSample(ItemSample):
     """A color strip to insert into legends for discretized continuous values"""
@@ -403,35 +401,6 @@ def _define_symbols():
 _define_symbols()
 
 
-# load C++ library
-path = os.path.dirname(os.path.abspath(__file__))
-lib = ctypes.pydll.LoadLibrary(os.path.join(path, "_grid_knn" + sysconfig.get_config_var("SO")))
-
-# compute the color density image
-def compute_density(x_grid, y_grid, x_data, y_data, rgb_data):
-    fun = lib.compute_density
-    fun.restype = None
-    fun.argtypes = [ctypes.c_int,
-                    np.ctypeslib.ndpointer(ctypes.c_double, flags="C_CONTIGUOUS"),
-                    np.ctypeslib.ndpointer(ctypes.c_double, flags="C_CONTIGUOUS"),
-                    ctypes.c_int,
-                    np.ctypeslib.ndpointer(ctypes.c_double, flags="C_CONTIGUOUS"),
-                    np.ctypeslib.ndpointer(ctypes.c_double, flags="C_CONTIGUOUS"),
-                    np.ctypeslib.ndpointer(ctypes.c_int, flags="C_CONTIGUOUS"),
-                    np.ctypeslib.ndpointer(ctypes.c_int, flags="C_CONTIGUOUS")]
-    gx = np.ascontiguousarray(x_grid, dtype=np.float64)
-    gy = np.ascontiguousarray(y_grid, dtype=np.float64)
-    dx = np.ascontiguousarray(x_data, dtype=np.float64)
-    dy = np.ascontiguousarray(y_data, dtype=np.float64)
-    drgb = np.ascontiguousarray(rgb_data, dtype=np.int32)
-    resolution = len(x_grid)
-    n_points = len(x_data)
-    img = np.ascontiguousarray(np.zeros((resolution, resolution, 4)), dtype=np.int32)
-    fun(resolution, gx, gy, n_points, dx, dy, drgb, img)
-    img = np.swapaxes(img, 0, 1)
-    return img
-
-
 class OWScatterPlotGraph(gui.OWComponent, ScaleScatterPlotData):
     attr_color = ContextSetting("", ContextSetting.OPTIONAL)
     attr_label = ContextSetting("", ContextSetting.OPTIONAL)
@@ -444,7 +413,7 @@ class OWScatterPlotGraph(gui.OWComponent, ScaleScatterPlotData):
     show_legend = Setting(True)
     tooltip_shows_all = Setting(False)
     class_density = Setting(False)
-    resolution = 500
+    resolution = 256
 
     CurveSymbols = np.array("o x t + d s ?".split())
     MinShapeSize = 6
@@ -504,8 +473,16 @@ class OWScatterPlotGraph(gui.OWComponent, ScaleScatterPlotData):
 
     def new_data(self, data, subset_data=None, **args):
         self.plot_widget.clear()
-        self.subset_indices = set(e.id for e in subset_data) if subset_data else None
+
+        self.density_img = None
+        self.scatterplot_item = None
+        self.scatterplot_item_sel = None
+        self.labels = []
         self.selection = None
+        self.valid_data = None
+
+        self.subset_indices = set(e.id for e in subset_data) if subset_data else None
+
         self.set_data(data, **args)
 
     def update_data(self, attr_x, attr_y, reset_view=True):
@@ -515,10 +492,13 @@ class OWScatterPlotGraph(gui.OWComponent, ScaleScatterPlotData):
         self.remove_legend()
         if self.density_img:
             self.plot_widget.removeItem(self.density_img)
+            self.density_img = None
         if self.scatterplot_item:
             self.plot_widget.removeItem(self.scatterplot_item)
+            self.scatterplot_item = None
         if self.scatterplot_item_sel:
             self.plot_widget.removeItem(self.scatterplot_item_sel)
+            self.scatterplot_item_sel = None
         for label in self.labels:
             self.plot_widget.removeItem(label)
         self.labels = []
@@ -527,6 +507,7 @@ class OWScatterPlotGraph(gui.OWComponent, ScaleScatterPlotData):
 
         if self.scaled_data is None or not len(self.scaled_data):
             self.valid_data = None
+            self.selection = None
             self.n_points = 0
             return
 
@@ -563,28 +544,23 @@ class OWScatterPlotGraph(gui.OWComponent, ScaleScatterPlotData):
         shape_data = self.compute_symbols()
 
         if self.should_draw_density():
-            x_sz = (max_x-min_x)/(self.resolution-1)
-            y_sz = (max_y-min_y)/(self.resolution-1)
-            x_grid = [min_x+i*x_sz for i in range(self.resolution)]
-            y_grid = [min_y+i*y_sz for i in range(self.resolution)]
             rgb_data = [pen.color().getRgb()[:3] for pen in color_data]
-            img = compute_density(x_grid, y_grid, x_data, y_data, rgb_data)
-            self.density_img = ImageItem(img, autoLevels=False)
-            self.density_img.setRect(QRectF(min_x-x_sz/2, min_y-y_sz/2,
-                                            max_x-min_x+x_sz, max_y-min_y+y_sz))
+            self.density_img = classdensity.class_density_image(min_x, max_x, min_y, max_y, self.resolution,
+                                                                x_data, y_data, rgb_data)
             self.plot_widget.addItem(self.density_img)
 
+        data_indices = np.flatnonzero(self.valid_data)
         self.scatterplot_item = ScatterPlotItem(
-            x=x_data, y=y_data, data=np.arange(self.n_points),
+            x=x_data, y=y_data, data=data_indices,
             symbol=shape_data, size=size_data, pen=color_data, brush=brush_data
         )
         self.scatterplot_item_sel = ScatterPlotItem(
-            x=x_data, y=y_data, data=np.arange(self.n_points),
+            x=x_data, y=y_data, data=data_indices,
             symbol=shape_data, size=size_data + SELECTION_WIDTH,
             pen=color_data_sel, brush=brush_data_sel
         )
-        self.plot_widget.addItem(self.scatterplot_item)
         self.plot_widget.addItem(self.scatterplot_item_sel)
+        self.plot_widget.addItem(self.scatterplot_item)
 
         self.scatterplot_item.selected_points = []
         self.scatterplot_item.sigClicked.connect(self.select_by_click)
@@ -671,7 +647,7 @@ class OWScatterPlotGraph(gui.OWComponent, ScaleScatterPlotData):
         pens = [ QPen(Qt.NoPen),
                  make_pen(QColor(255, 190, 0, 255), SELECTION_WIDTH + 1.) ]
         if self.selection is not None:
-            pen = [ pens[a] for a in self.selection ]
+            pen = [pens[a] for a in self.selection[self.valid_data]]
         else:
             pen = [pens[0]] * self.n_points
         brush = [QBrush(QColor(255, 255, 255, 0))] * self.n_points
@@ -910,13 +886,15 @@ class OWScatterPlotGraph(gui.OWComponent, ScaleScatterPlotData):
         # self.view_box.autoRange()
 
     def select_by_click(self, _, points):
-        self.select(points)
+        if self.scatterplot_item is not None:
+            self.select(points)
 
     def select_by_rectangle(self, value_rect):
-        points = [point
-                  for point in self.scatterplot_item.points()
-                  if value_rect.contains(QPointF(point.pos()))]
-        self.select(points)
+        if self.scatterplot_item is not None:
+            points = [point
+                      for point in self.scatterplot_item.points()
+                      if value_rect.contains(QPointF(point.pos()))]
+            self.select(points)
 
     def unselect_all(self):
         self.selection = None
@@ -925,15 +903,17 @@ class OWScatterPlotGraph(gui.OWComponent, ScaleScatterPlotData):
 
     def select(self, points):
         # noinspection PyArgumentList
+        if self.raw_data is None:
+            return
         keys = QApplication.keyboardModifiers()
         if self.selection is None or not keys & (
                         Qt.ShiftModifier + Qt.ControlModifier + Qt.AltModifier):
-            self.selection = np.full(self.n_points, False, dtype=np.bool)
+            self.selection = np.full(len(self.raw_data), False, dtype=np.bool)
         indices = [p.data() for p in points]
-        if keys & Qt.ControlModifier:
+        if keys & Qt.AltModifier:
             self.selection[indices] = False
-        elif keys & Qt.AltModifier:
-            self.selection[indices] = 1 - self.selection[indices]
+        elif keys & Qt.ControlModifier:
+            self.selection[indices] = ~self.selection[indices]
         else:  # Handle shift and no modifiers
             self.selection[indices] = True
         self.update_colors(keep_colors=True)
@@ -943,8 +923,7 @@ class OWScatterPlotGraph(gui.OWComponent, ScaleScatterPlotData):
         if self.selection is None:
             return np.array([], dtype=int)
         else:
-            return np.arange(len(self.raw_data)
-                )[self.valid_data][self.selection]
+            return np.flatnonzero(self.selection)
 
     def set_palette(self, p):
         self.plot_widget.setPalette(p)

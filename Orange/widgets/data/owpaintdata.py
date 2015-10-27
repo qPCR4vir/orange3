@@ -25,7 +25,7 @@ import Orange.data
 from Orange.widgets import widget, gui
 from Orange.widgets.settings import Setting
 from Orange.widgets.utils import itemmodels, colorpalette
-from Orange.widgets.io import FileFormats
+from Orange.widgets.io import FileFormat
 
 
 def indices_to_mask(indices, size):
@@ -765,11 +765,13 @@ class ColoredListModel(itemmodels.PyListModel):
 
         super().__init__(iterable, parent, flags, list_item_role,
                          supportedDropActions)
-        self.colors = colorpalette.ColorPaletteGenerator(10)
+        self.colors = colorpalette.ColorPaletteGenerator(
+            len(colorpalette.DefaultRGBColors))
 
     def data(self, index, role=QtCore.Qt.DisplayRole):
         if self._is_index_valid_for(index, self) and \
-                role == QtCore.Qt.DecorationRole:
+                role == QtCore.Qt.DecorationRole and \
+                0 <= index.row() < self.colors.number_of_colors:
             return gui.createAttributePixmap("", self.colors[index.row()])
         else:
             return super().data(index, role)
@@ -801,6 +803,7 @@ class OWPaintData(widget.OWWidget):
     outputs = [("Data", Orange.data.Table)]
 
     autocommit = Setting(False)
+    table_name = Setting("Painted data")
     attr1 = Setting("x")
     attr2 = Setting("y")
 
@@ -809,8 +812,8 @@ class OWPaintData(widget.OWWidget):
 
     want_graph = True
 
-    def __init__(self, parent=None):
-        super().__init__(parent)
+    def __init__(self):
+        super().__init__()
 
         self.data = None
         self.current_tool = None
@@ -835,7 +838,8 @@ class OWPaintData(widget.OWWidget):
         self._init_ui()
 
         self.data = numpy.zeros((0, 3))
-        self.colors = colorpalette.ColorPaletteGenerator(10)
+        self.colors = colorpalette.ColorPaletteGenerator(
+            len(colorpalette.DefaultRGBColors))
 
     def _init_ui(self):
         namesBox = gui.widgetBox(self.controlArea, "Names")
@@ -858,7 +862,7 @@ class OWPaintData(widget.OWWidget):
         itemmodels.select_row(listView, 0)
         namesBox.layout().addWidget(listView)
 
-        addClassLabel = QAction(
+        self.addClassLabel = QAction(
             "+", self,
             toolTip="Add new class label",
             triggered=self.add_new_class_label
@@ -871,7 +875,7 @@ class OWPaintData(widget.OWWidget):
         )
 
         actionsWidget = itemmodels.ModelActionsWidget(
-            [addClassLabel, self.removeClassLabel], self
+            [self.addClassLabel, self.removeClassLabel], self
         )
         actionsWidget.layout().addStretch(10)
         actionsWidget.layout().setSpacing(1)
@@ -1009,7 +1013,8 @@ class OWPaintData(widget.OWWidget):
     def _class_count_changed(self):
         self.labels = list(self.class_model)
         self.removeClassLabel.setEnabled(len(self.class_model) > 1)
-
+        self.addClassLabel.setEnabled(
+            len(self.class_model) < self.colors.number_of_colors)
         if self.selected_class_label() is None:
             itemmodels.select_row(self.classValuesView, 0)
 
@@ -1169,7 +1174,7 @@ class OWPaintData(widget.OWWidget):
         else:
             domain = Orange.data.Domain(attrs)
             data = Orange.data.Table.from_numpy(domain, X)
-
+        data.name = self.table_name
         self.send("Data", data)
 
     def sizeHint(self):
@@ -1182,8 +1187,8 @@ class OWPaintData(widget.OWWidget):
     def save_graph(self):
         from Orange.widgets.data.owsave import OWSave
 
-        save_img = OWSave(parent=self, data=self.plotview.plotItem,
-                          file_formats=FileFormats.img_writers)
+        save_img = OWSave(data=self.plotview.plotItem,
+                          file_formats=FileFormat.img_writers)
         save_img.exec_()
 
 

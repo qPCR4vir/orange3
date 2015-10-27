@@ -28,7 +28,7 @@ import Orange.data
 
 from Orange.widgets import widget, gui, settings
 from Orange.widgets.utils import itemmodels, colorpalette
-from Orange.widgets.io import FileFormats
+from Orange.widgets.io import FileFormat
 
 
 _InputData = namedtuple("_InputData", ["key", "name", "table"])
@@ -42,7 +42,7 @@ class OWVennDiagram(widget.OWWidget):
     icon = "icons/VennDiagram.svg"
 
     inputs = [("Data", Orange.data.Table, "setData", widget.Multiple)]
-    outputs = [("Data", Orange.data.Table)]
+    outputs = [("Selected Data", Orange.data.Table)]
 
     # Selected disjoint subset indices
     selection = settings.Setting([])
@@ -52,12 +52,12 @@ class OWVennDiagram(widget.OWWidget):
     inputhints = settings.Setting({})
     #: Use identifier columns for instance matching
     useidentifiers = settings.Setting(True)
-    autocommit = settings.Setting(False)
+    autocommit = settings.Setting(True)
 
     want_graph = True
 
-    def __init__(self, parent=None):
-        super().__init__(parent)
+    def __init__(self):
+        super().__init__()
 
         # Diagram update is in progress
         self._updating = False
@@ -95,7 +95,9 @@ class OWVennDiagram(widget.OWWidget):
                                 addSpace=False)
             box.setFlat(True)
             model = itemmodels.VariableListModel(parent=self)
-            cb = QComboBox()
+            cb = QComboBox(
+                minimumContentsLength=12,
+                sizeAdjustPolicy=QComboBox.AdjustToMinimumContentsLengthWithIcon)
             cb.setModel(model)
             cb.activated[int].connect(self._on_inputAttrActivated)
             box.setEnabled(False)
@@ -529,8 +531,10 @@ class OWVennDiagram(widget.OWWidget):
 
             # add columns with source table id and set id
 
-            id_column = [[instance_key(inst)] for inst in subset]
-            source_names = numpy.array([[names[i]]] * len(subset))
+            id_column = numpy.array([[instance_key(inst)] for inst in subset],
+                                    dtype=object)
+            source_names = numpy.array([[names[i]]] * len(subset),
+                                       dtype=object)
 
             subset = append_column(subset, "M", source_var, source_names)
             subset = append_column(subset, "M", item_id_var, id_column)
@@ -552,7 +556,7 @@ class OWVennDiagram(widget.OWWidget):
         else:
             data = None
 
-        self.send("Data", data)
+        self.send("Selected Data", data)
 
     def getSettings(self, *args, **kwargs):
         self._storeHints()
@@ -561,8 +565,8 @@ class OWVennDiagram(widget.OWWidget):
     def save_graph(self):
         from Orange.widgets.data.owsave import OWSave
 
-        save_img = OWSave(parent=self, data=self.scene,
-                          file_formats=FileFormats.img_writers)
+        save_img = OWSave(data=self.scene,
+                          file_formats=FileFormat.img_writers)
         save_img.exec_()
 
 
@@ -589,7 +593,7 @@ def domain_eq(d1, d2):
 
 
 # Comparing/hashing Orange.data.Instance across domains ignoring metas.
-class ComparableInstance(object):
+class ComparableInstance:
     __slots__ = ["inst", "domain"]
 
     def __init__(self, inst):
@@ -757,10 +761,19 @@ def reshape_wide(table, varlist, idvarlist, groupvarlist):
     domain = Orange.data.Domain(newfeatures, newclass_vars, newmetas)
     prototype_indices = [inst_by_id[inst_id][0] for inst_id in ids]
     newtable = Orange.data.Table.from_table(domain, table)[prototype_indices]
+    in_expanded = set(f for efd in expanded_features.values() for f in efd.values())
 
     for i, inst_id in enumerate(ids):
         indices = inst_by_id[inst_id]
         instance = newtable[i]
+
+        for var in domain.variables + domain.metas:
+            if var in idvarlist or var in in_expanded:
+                continue
+            if numpy.isnan(instance[var]):
+                for ind in indices:
+                    if not numpy.isnan(table[ind, var]):
+                        newtable[i, var] = table[ind, var]
 
         for index in indices:
             source_inst = table[index]
@@ -965,6 +978,22 @@ class VennIntersectionArea(QGraphicsPathItem):
     def hoverLeaveEvent(self, event):
         self.setZValue(self.zValue() - 1)
         return QGraphicsPathItem.hoverLeaveEvent(self, event)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            if event.modifiers() & Qt.AltModifier:
+                self.setSelected(False)
+            elif event.modifiers() & Qt.ControlModifier:
+                self.setSelected(not self.isSelected())
+            elif event.modifiers() & Qt.ShiftModifier:
+                self.setSelected(True)
+            else:
+                for area in self.parentWidget().vennareas():
+                    area.setSelected(False)
+                self.setSelected(True)
+
+    def mouseReleaseEvent(self, event):
+        pass
 
     def paint(self, painter, option, widget=None):
         painter.save()

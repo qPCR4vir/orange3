@@ -725,16 +725,31 @@ class TableTestCase(unittest.TestCase):
         d = data.Table("zoo")
         d.save("test-zoo.tab")
         dd = data.Table("test-zoo")
-
         try:
             self.assertTupleEqual(d.domain.metas, dd.domain.metas, msg="Meta attributes don't match.")
             self.assertTupleEqual(d.domain.variables, dd.domain.variables, msg="Attributes don't match.")
 
+            np.testing.assert_almost_equal(d.W, dd.W, err_msg="Weights don't match.")
             for i in range(10):
                 for j in d.domain.variables:
                     self.assertEqual(d[i][j], dd[i][j])
         finally:
             os.remove("test-zoo.tab")
+
+        d = data.Table("zoo")
+        d.set_weights(range(len(d)))
+        d.save("test-zoo-weights.tab")
+        dd = data.Table("test-zoo-weights")
+        try:
+            self.assertTupleEqual(d.domain.metas, dd.domain.metas, msg="Meta attributes don't match.")
+            self.assertTupleEqual(d.domain.variables, dd.domain.variables, msg="Attributes don't match.")
+
+            np.testing.assert_almost_equal(d.W, dd.W, err_msg="Weights don't match.")
+            for i in range(10):
+                for j in d.domain.variables:
+                    self.assertEqual(d[i][j], dd[i][j])
+        finally:
+            os.remove("test-zoo-weights.tab")
 
     def test_save_pickle(self):
         table = data.Table("iris")
@@ -1192,7 +1207,7 @@ class CreateTableWithFilename(TableTests):
     filename = "data.tab"
 
     @patch("os.path.exists", Mock(return_value=True))
-    @patch("Orange.data.io.TabDelimFormat")
+    @patch("Orange.data.io.TabFormat")
     def test_read_data_calls_reader(self, reader_mock):
         table_mock = Mock(data.Table)
         reader_instance = reader_mock.return_value = \
@@ -1208,11 +1223,11 @@ class CreateTableWithFilename(TableTests):
         table_mock = Mock(data.Table)
         reader_instance = Mock(read_file=Mock(return_value=table_mock))
 
-        with patch.dict(data.io.FileFormats.readers,
-                        {'.xlsx': lambda: reader_instance}):
+        with patch.dict(data.io.FileFormat.readers,
+                        {'.xlsx': reader_instance}):
             table = data.Table.from_file("test.xlsx")
 
-        reader_instance.read_file.assert_called_with("test.xlsx", data.Table)
+        reader_instance.read_file.assert_called_with("test.xlsx", None)
         self.assertEqual(table, table_mock)
 
     @patch("os.path.exists", Mock(return_value=False))
@@ -1441,7 +1456,8 @@ class CreateTableWithData(TableTests):
         domain = self.mock_domain()
         table = data.Table.from_numpy(domain, self.data, W=self.weight_data)
 
-        np.testing.assert_almost_equal(table.W, self.weight_data)
+        np.testing.assert_equal(table.W.shape, (len(self.data), ))
+        np.testing.assert_almost_equal(table.W.flatten(), self.weight_data.flatten())
 
     def test_splits_X_and_Y_if_given_in_same_array(self):
         joined_data = np.column_stack((self.data, self.class_data))

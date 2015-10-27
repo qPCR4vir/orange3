@@ -134,8 +134,8 @@ class OWDiscretize(widget.OWWidget):
     settingsHandler = settings.DomainContextHandler()
     saved_var_states = settings.ContextSetting({})
 
-    default_method = settings.Setting(0)
-    default_k = settings.Setting(5)
+    default_method = settings.Setting(2)
+    default_k = settings.Setting(3)
     autosend = settings.Setting(True)
 
     #: Discretization methods
@@ -143,8 +143,8 @@ class OWDiscretize(widget.OWWidget):
 
     want_main_area = False
 
-    def  __init__(self, parent=None):
-        super().__init__(parent)
+    def  __init__(self):
+        super().__init__()
 
         #: input data
         self.data = None

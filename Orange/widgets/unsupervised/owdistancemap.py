@@ -23,7 +23,7 @@ from Orange.clustering import hierarchical
 from Orange.widgets import widget, gui, settings
 from Orange.widgets.utils import itemmodels, colorbrewer
 from .owhierarchicalclustering import DendrogramWidget, GraphicsSimpleTextList
-from Orange.widgets.io import FileFormats
+from Orange.widgets.io import FileFormat
 
 
 def _remove_item(item):
@@ -58,7 +58,7 @@ class DistanceMapItem(pg.ImageItem):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.setAcceptedMouseButtons(Qt.LeftButton)
+        self.setAcceptedMouseButtons(Qt.LeftButton | Qt.RightButton)
         self.setAcceptHoverEvents(True)
 
         self.__selections = []
@@ -143,6 +143,8 @@ class DistanceMapItem(pg.ImageItem):
                 self.__select(QRect(), self.Clear)
                 selrange = QRect(c, r, 1, 1)
                 self.__elastic_band_select(selrange, self.Select | self.Clear)
+        elif event.button() == Qt.RightButton:
+            self.__select(QRect(), self.Clear)
 
         super().mousePressEvent(event)
         event.accept()
@@ -223,7 +225,7 @@ class DistanceMapItem(pg.ImageItem):
         super().hoverMoveEvent(event)
         i, j = self._cellAt(event.pos())
         if i != -1 and j != -1:
-            d = self.image[i, self.image.shape[1] - j - 1]
+            d = self.image[i, j]
             self.setToolTip("{}, {}: {:.3f}".format(i, j, d))
         else:
             self.setToolTip("")
@@ -251,8 +253,8 @@ class OWDistanceMap(widget.OWWidget):
 
     want_graph = True
 
-    def __init__(self, parent=None):
-        super().__init__(parent)
+    def __init__(self):
+        super().__init__()
 
         self.matrix = None
         self._tree = None
@@ -275,6 +277,10 @@ class OWDistanceMap(widget.OWWidget):
         )
         self.colormap_cb.setIconSize(QSize(64, 16))
         self.palettes = list(sorted(load_default_palettes()))
+        self.palettes += [("Blue-Yellow", {2: [(0, 0, 255), (255, 255, 0)]})]
+        for i, pcolor in enumerate(self.palettes):
+            if pcolor[0] == 'Blue-Yellow':
+                self.colormap = i
         init_color_combo(self.colormap_cb, self.palettes, QSize(64, 16))
         self.colormap_cb.setCurrentIndex(self.colormap)
 
@@ -305,7 +311,8 @@ class OWDistanceMap(widget.OWWidget):
 
         box = gui.widgetBox(self.controlArea, "Annotations")
         self.annot_combo = gui.comboBox(box, self, "annotation_idx",
-                                        callback=self._invalidate_annotations)
+                                        callback=self._invalidate_annotations,
+                                        contentsLength=12)
         self.annot_combo.setModel(itemmodels.VariableListModel())
         self.annot_combo.model()[:] = ["None", "Enumeration"]
         self.controlArea.layout().addStretch()
@@ -320,7 +327,7 @@ class OWDistanceMap(widget.OWWidget):
         self.grid = QGraphicsGridLayout()
         self.grid_widget.setLayout(self.grid)
 
-        self.viewbox = pg.ViewBox(enableMouse=False)
+        self.viewbox = pg.ViewBox(enableMouse=False, enableMenu=False)
         self.viewbox.setAcceptedMouseButtons(Qt.NoButton)
         self.viewbox.setAcceptHoverEvents(False)
         self.grid.addItem(self.viewbox, 1, 1)
@@ -370,7 +377,7 @@ class OWDistanceMap(widget.OWWidget):
         self.clear()
         self.error(0)
         if matrix is not None:
-            N, _ = matrix.X.shape
+            N, _ = matrix.shape
             if N < 2:
                 self.error(0, "Empty distance matrix.")
                 matrix = None
@@ -583,8 +590,8 @@ class OWDistanceMap(widget.OWWidget):
     def save_graph(self):
         from Orange.widgets.data.owsave import OWSave
 
-        save_img = OWSave(parent=self, data=self.grid_widget,
-                          file_formats=FileFormats.img_writers)
+        save_img = OWSave(data=self.grid_widget,
+                          file_formats=FileFormat.img_writers)
         save_img.exec_()
 
 

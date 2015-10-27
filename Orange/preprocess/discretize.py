@@ -24,21 +24,24 @@ class Discretizer(Transformation):
 
     @staticmethod
     def _fmt_interval(low, high, decimals):
+        assert low is not None or high is not None
         assert low is None or high is None or low < high
         assert decimals >= 0
 
-        def fmt_value(value, decimals):
-            return (("%%.%if" % decimals) % value).rstrip("0").rstrip(".")
+        def fmt_value(value):
+            if value is None or np.isinf(value):
+                return None
+            val = str(round(value, decimals))
+            if val.endswith(".0"):
+                return val[:-2]
+            return val
 
-        if (low is None or np.isinf(low)) and \
-                not (high is None or np.isinf(high)):
-            return "<{}".format(fmt_value(high, decimals))
-        elif (high is None or np.isinf(high)) and \
-                not (low is None or np.isinf(low)):
-            return ">={}".format(fmt_value(low, decimals))
-        else:
-            return "[{}, {})".format(fmt_value(low, decimals),
-                                     fmt_value(high, decimals))
+        low, high = fmt_value(low), fmt_value(high)
+        if not low:
+            return "< {}".format(high)
+        if not high:
+            return "≥ {}".format(low)
+        return "{} - {}".format(low, high)
 
     @classmethod
     def create_discretized_var(cls, var, points):
@@ -52,7 +55,7 @@ class Discretizer(Transformation):
             values = ["single_value"]
             to_sql = SingleValueSql(values[0])
 
-        dvar = DiscreteVariable(name="D_" + var.name, values=values,
+        dvar = DiscreteVariable(name=var.name, values=values,
                                 compute_value=cls(var, points))
         dvar.source_variable = var
         dvar.to_sql = to_sql
@@ -133,7 +136,7 @@ class EqualWidth(Discretization):
     def __call__(self, data, attribute, fixed=None):
         if fixed:
             min, max = fixed[attribute.name]
-            points = self._split_eq_width_fixed(min, max, n=self.n)
+            points = self._split_eq_width(min, max)
         else:
             if type(data) == SqlTable:
                 att = attribute.to_sql()
@@ -141,31 +144,20 @@ class EqualWidth(Discretization):
                                          'max(%s)::double precision' % att])
                 with data._execute_sql_query(query) as cur:
                     min, max = cur.fetchone()
-                dif = (max - min) / self.n
-                points = [min + (i + 1) * dif for i in range(self.n - 1)]
+                points = self._split_eq_width(min, max)
             else:
-                # TODO: why is the whole distribution computed instead of
-                # just min/max
-                d = distribution.get_distribution(data, attribute)
-                points = self._split_eq_width(d, n=self.n)
+                values = data[:, attribute]
+                values = values.X if values.X.size else values.Y
+                min, max = np.nanmin(values), np.nanmax(values)
+                points = self._split_eq_width(min, max)
         return Discretizer.create_discretized_var(
             data.domain[attribute], points)
 
-    @staticmethod
-    def _split_eq_width(dist, n):
-        min = dist[0][0]
-        max = dist[0][-1]
-        if min == max:
+    def _split_eq_width(self, min, max):
+        if np.isnan(min) or np.isnan(max) or min == max:
             return []
-        dif = (max - min) / n
-        return [min + (i + 1) * dif for i in range(n - 1)]
-
-    @staticmethod
-    def _split_eq_width_fixed(min, max, n):
-        if min == max:
-            return []
-        dif = (max - min) / n
-        return [min + (i + 1) * dif for i in range(n - 1)]
+        dif = (max - min) / self.n
+        return [min + (i + 1) * dif for i in range(self.n - 1)]
 
 
 # noinspection PyPep8Naming

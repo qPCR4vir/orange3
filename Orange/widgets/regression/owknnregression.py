@@ -8,6 +8,7 @@ from Orange.preprocess.preprocess import Preprocess
 
 from Orange.widgets import widget, gui
 from Orange.widgets.settings import Setting
+from Orange.widgets.utils.sql import check_sql_input
 
 
 class OWKNNRegression(widget.OWWidget):
@@ -27,8 +28,8 @@ class OWKNNRegression(widget.OWWidget):
     n_neighbors = Setting(5)
     metric_index = Setting(0)
 
-    def __init__(self, parent=None):
-        super().__init__(parent)
+    def __init__(self):
+        super().__init__()
 
         self.preprocessors = ()
         self.data = None
@@ -55,6 +56,7 @@ class OWKNNRegression(widget.OWWidget):
 
         self.apply()
 
+    @check_sql_input
     def set_data(self, data):
         """Set input training dataset."""
         self.data = data

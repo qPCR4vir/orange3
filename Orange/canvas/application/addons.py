@@ -1,4 +1,5 @@
 import sys
+import sysconfig
 import os
 import errno
 import shlex
@@ -22,7 +23,7 @@ from PyQt4.QtGui import (
     QTextBrowser, QTextOption, QDialogButtonBox, QProgressDialog,
     QVBoxLayout, QPalette, QStandardItemModel, QStandardItem,
     QSortFilterProxyModel, QItemSelectionModel, QStyle, QStyledItemDelegate,
-    QStyleOptionViewItemV4, QApplication
+    QStyleOptionViewItemV4, QApplication, QHBoxLayout
 )
 
 from PyQt4.QtCore import (
@@ -33,6 +34,14 @@ from PyQt4.QtCore import pyqtSignal as Signal, pyqtSlot as Slot
 from ..gui.utils import message_warning, message_information, \
                         message_critical as message_error
 from ..help.manager import get_dist_meta, trim
+
+OFFICIAL_ADDONS = [
+    "Orange-Bioinformatics",
+    "Orange3-DataFusion",
+    "Orange3-Prototypes",
+    "Orange3-Text",
+    "Orange3-Network",
+]
 
 Installable = namedtuple(
     "Installable",
@@ -382,6 +391,16 @@ class AddonManagerDialog(QDialog):
 
         self.addonwidget = AddonManagerWidget()
         self.layout().addWidget(self.addonwidget)
+
+        info_bar = QWidget()
+        info_layout = QHBoxLayout()
+        info_bar.setLayout(info_layout)
+        info_icon = QLabel()
+        info_text = QLabel()
+        info_layout.addWidget(info_icon)
+        info_layout.addWidget(info_text)
+        self.layout().addWidget(info_bar)
+
         buttons = QDialogButtonBox(
             orientation=Qt.Horizontal,
             standardButtons=QDialogButtonBox.Ok | QDialogButtonBox.Cancel
@@ -390,6 +409,20 @@ class AddonManagerDialog(QDialog):
         buttons.rejected.connect(self.reject)
 
         self.layout().addWidget(buttons)
+
+        if not os.access(sysconfig.get_path("purelib"), os.W_OK):
+            if sysconfig.get_platform().startswith("macosx"):
+                info = "You must install Orange by dragging it into" \
+                       " Applications before installing add-ons."
+            else:
+                info = "You do not have permissions to write into Orange " \
+                       "directory.\nYou may need to contact an administrator " \
+                       "for assistance."
+            info_text.setText(info)
+            style = QApplication.instance().style()
+            info_icon.setPixmap(style.standardIcon(
+                QStyle.SP_MessageBoxCritical).pixmap(14, 14))
+            buttons.button(QDialogButtonBox.Ok ).setEnabled(False)
 
         self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         if AddonManagerDialog._packages is None:
@@ -532,7 +565,7 @@ class AddonManagerDialog(QDialog):
 
     def __on_installer_finished(self):
         message_information(
-            "Please restart the application for changes to take effect.",
+            "Please restart Orange for changes to take effect.",
             parent=self)
         self.accept()
 
@@ -546,6 +579,12 @@ def list_pypi_addons():
     pypi = xmlrpc.client.ServerProxy("http://pypi.python.org/pypi")
     addons = pypi.search(ADDON_PYPI_SEARCH_SPEC)
 
+    for addon in OFFICIAL_ADDONS:
+        if not any(a for a in addons if a['name'] == addon):
+            versions = pypi.package_releases(addon)
+            if versions:
+                addons.append({"name": addon, "version": max(versions)})
+
     multicall = xmlrpc.client.MultiCall(pypi)
     for addon in addons:
         name, version = addon["name"], addon["version"]
@@ -556,6 +595,7 @@ def list_pypi_addons():
     release_data = results[::2]
     release_urls = results[1::2]
     packages = []
+
     for release, urls in zip(release_data, release_urls):
         urls = [ReleaseUrl(url["filename"], url["url"],
                            url["size"], url["python_version"],

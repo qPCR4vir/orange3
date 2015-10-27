@@ -5,6 +5,7 @@ import functools
 import re
 import threading
 from contextlib import contextmanager
+from itertools import islice
 
 import numpy as np
 
@@ -12,11 +13,12 @@ import Orange.misc
 psycopg2 = Orange.misc.import_late_warning("psycopg2")
 psycopg2.pool = Orange.misc.import_late_warning("psycopg2.pool")
 
-from .. import domain, variable, value, table, instance, filter,\
+from .. import domain, variable, table, instance, filter,\
     DiscreteVariable, ContinuousVariable, StringVariable
 from Orange.data.sql import filter as sql_filter
 
 LARGE_TABLE = 100000
+AUTO_DL_LIMIT = 10000
 DEFAULT_SAMPLE_TIME = 1
 
 
@@ -192,7 +194,7 @@ class SqlTable(table.Table):
             try:
                 col_idx = self.domain.index(col_idx)
                 var = self.domain[col_idx]
-                return value.Value(
+                return variable.Value(
                     var,
                     self._query(self.table_name, var, rows=[row_idx])
                 )
@@ -313,28 +315,69 @@ class SqlTable(table.Table):
 
     _X = None
     _Y = None
+    _metas = None
+    _W = None
+    _ids = None
 
-    def download_data(self, limit=None):
+    def download_data(self, limit=None, partial=False):
         """Download SQL data and store it in memory as numpy matrices."""
-        if limit and len(self) > limit: #TODO: faster check for size limit
+        if limit and not partial and self.approx_len() > limit:
             raise ValueError("Too many rows to download the data into memory.")
-        self._X = np.vstack(row._x for row in self)
-        self._Y = np.vstack(row._y for row in self)
-        self._cached__len__ = self._X.shape[0]
+        X, Y, metas = [], [], []
+        for row in islice(self, limit):
+            X.append(row._x)
+            Y.append(row._y)
+            metas.append(row._metas)
+        self._X = np.vstack(X)
+        self._Y = np.vstack(Y)
+        self._metas = np.vstack(metas)
+        self._W = np.empty((self._X.shape[0], 0))
+        self._init_ids(self)
+        if not partial or limit and self._X.shape[0] < limit:
+            self._cached__len__ = self._X.shape[0]
 
     @property
     def X(self):
         """Numpy array with attribute values."""
         if self._X is None:
-            self.download_data(1000)
+            self.download_data(AUTO_DL_LIMIT)
         return self._X
 
     @property
     def Y(self):
         """Numpy array with class values."""
         if self._Y is None:
-            self.download_data(1000)
+            self.download_data(AUTO_DL_LIMIT)
         return self._Y
+
+    @property
+    def metas(self):
+        """Numpy array with class values."""
+        if self._metas is None:
+            self.download_data(AUTO_DL_LIMIT)
+        return self._metas
+
+    @property
+    def W(self):
+        """Numpy array with class values."""
+        if self._W is None:
+            self.download_data(AUTO_DL_LIMIT)
+        return self._W
+
+    @property
+    def ids(self):
+        """Numpy array with class values."""
+        if self._ids is None:
+            self.download_data(AUTO_DL_LIMIT)
+        return self._ids
+
+    @ids.setter
+    def ids(self, value):
+        self._ids = value
+
+    @ids.deleter
+    def ids(self):
+        del self._ids
 
     def has_weights(self):
         return False
@@ -442,7 +485,7 @@ class SqlTable(table.Table):
                 else:
                     all_contingencies[i] =\
                         (self._discrete_contingencies(data, row, column), [])
-        return all_contingencies
+        return all_contingencies, None
 
     def _continuous_contingencies(self, data, row):
         values = np.zeros(len(data))
@@ -597,6 +640,8 @@ class SqlTable(table.Table):
         return "'%s'" % value
 
     def sample_percentage(self, percentage, no_cache=False):
+        if percentage >= 100:
+            return self
         return self._sample('system', percentage,
                             no_cache=no_cache)
 

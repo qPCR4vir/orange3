@@ -19,7 +19,7 @@ from Orange.preprocess.discretize import EqualWidth, Discretizer
 
 from Orange.widgets import widget, gui, settings
 from Orange.widgets.utils import itemmodels, colorpalette
-from Orange.widgets.io import FileFormats
+from Orange.widgets.io import FileFormat
 
 
 def is_not_none(obj):
@@ -452,7 +452,7 @@ def resample(node, samplewidth):
 
 class OWScatterMap(widget.OWWidget):
     name = "Scatter Map"
-    description = "Draw a two dimentional rectangular bin density plot."
+    description = "Draw a two dimensional rectangular bin density plot."
     icon = "icons/Scattermap.svg"
     priority = 100
 
@@ -481,8 +481,8 @@ class OWScatterMap(widget.OWWidget):
 
     want_graph = True
 
-    def __init__(self, parent=None):
-        super().__init__(self, parent)
+    def __init__(self):
+        super().__init__()
 
         self.dataset = None
         self.z_values = []
@@ -497,19 +497,22 @@ class OWScatterMap(widget.OWWidget):
         box = gui.widgetBox(self.controlArea, "Axes")
         self.x_var_model = itemmodels.VariableListModel()
         self.comboBoxAttributesX = gui.comboBox(
-            box, self, value='x_var_index', callback=self.replot)
+            box, self, value='x_var_index', callback=self.replot,
+            contentsLength=12)
         self.comboBoxAttributesX.setModel(self.x_var_model)
 
         self.y_var_model = itemmodels.VariableListModel()
         self.comboBoxAttributesY = gui.comboBox(
-            box, self, value='y_var_index', callback=self.replot)
+            box, self, value='y_var_index', callback=self.replot,
+            contentsLength=12)
         self.comboBoxAttributesY.setModel(self.y_var_model)
 
         box = gui.widgetBox(self.controlArea, "Color")
         self.z_var_model = itemmodels.VariableListModel()
         self.comboBoxClassvars = gui.comboBox(
             box, self, value='z_var_index',
-            callback=self._on_z_var_changed)
+            callback=self._on_z_var_changed,
+            contentsLength=12)
         self.comboBoxClassvars.setModel(self.z_var_model)
 
         self.z_values_view = gui.listBox(
@@ -978,8 +981,8 @@ class OWScatterMap(widget.OWWidget):
     def save_graph(self):
         from Orange.widgets.data.owsave import OWSave
 
-        save_img = OWSave(parent=self, data=self.plot.plotItem,
-                          file_formats=FileFormats.img_writers)
+        save_img = OWSave(data=self.plot.plotItem,
+                          file_formats=FileFormat.img_writers)
         save_img.exec_()
 
 
@@ -1262,7 +1265,7 @@ def create_image(contingencies, palette=None, scale=None):
         colors = 255 - colors[argmax.ravel()]
 
         # XXX: Non linear intensity scaling
-        colors *= P_max.ravel().reshape(-1, 1)
+        colors = colors * P_max.ravel().reshape(-1, 1)
         colors = colors.reshape(P_max.shape + (3,))
         colors = 255 - colors
     elif P.ndim == 2:
@@ -1276,10 +1279,10 @@ def create_image(contingencies, palette=None, scale=None):
 #         mix /= mix.max() if total else 1.0
 
         colors = np.zeros((np.prod(mix.shape), 3)) + 255
-        colors -= mix.ravel().reshape(-1, 1) * 255
+        colors = colors - mix.ravel().reshape(-1, 1) * 255
         colors = colors.reshape(mix.shape + (3,))
 
-    return colors
+    return colors.astype(int)
 
 
 def score_candidate_rects(node, region):

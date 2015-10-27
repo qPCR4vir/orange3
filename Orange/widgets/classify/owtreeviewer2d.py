@@ -2,7 +2,7 @@ from itertools import chain
 from Orange.widgets import gui
 from Orange.widgets.widget import OWWidget
 from Orange.widgets.settings import Setting
-from Orange.widgets.io import FileFormats
+from Orange.widgets.io import FileFormat
 
 from PyQt4.QtCore import *
 from PyQt4.QtGui import *
@@ -10,7 +10,7 @@ from PyQt4.QtGui import *
 DefDroppletBrush = QBrush(Qt.darkGray)
 
 
-class GraphNode(object):
+class GraphNode:
     def __init__(self, *_, **kwargs):
         self.edges = kwargs.get("edges", set())
 
@@ -28,7 +28,7 @@ class GraphNode(object):
         pass
 
 
-class GraphEdge(object):
+class GraphEdge:
     def __init__(self, node1=None, node2=None, atype=1):
         self.node1 = node1
         self.node2 = node2
@@ -541,9 +541,8 @@ class OWTreeViewer2D(OWWidget):
     def save_graph(self):
         from Orange.widgets.data.owsave import OWSave
 
-        save_img = OWSave(parent=self,
-                          data={'scene': self.scene, 'tree': self.tree},
+        save_img = OWSave(data={'scene': self.scene, 'tree': self.tree},
                           file_formats=dict(chain(
-                              FileFormats.img_writers.items(),
-                              FileFormats.graph_writers.items())))
+                              FileFormat.img_writers.items(),
+                              FileFormat.graph_writers.items())))
         save_img.exec_()

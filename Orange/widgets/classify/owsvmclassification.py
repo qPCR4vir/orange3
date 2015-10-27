@@ -7,6 +7,7 @@ from Orange.data import Table
 from Orange.classification.svm import SVMLearner, SVMClassifier, NuSVMLearner
 from Orange.preprocess.preprocess import Preprocess
 from Orange.widgets import widget, settings, gui
+from Orange.widgets.utils.sql import check_sql_input
 
 
 class OWSVMClassification(widget.OWWidget):
@@ -17,7 +18,7 @@ class OWSVMClassification(widget.OWWidget):
 
     inputs = [("Data", Table, "set_data"),
               ("Preprocessor", Preprocess, "set_preprocessor")]
-    outputs = [("Learner", SVMLearner),
+    outputs = [("Learner", SVMLearner, widget.Default),
                ("Classifier", SVMClassifier),
                ("Support vectors", Table)]
 
@@ -41,8 +42,8 @@ class OWSVMClassification(widget.OWWidget):
     max_iter = settings.Setting(100)
     limit_iter = settings.Setting(True)
 
-    def __init__(self, parent=None):
-        super().__init__(parent)
+    def __init__(self):
+        super().__init__()
 
         self.data = None
         self.preprocessors = None
@@ -120,6 +121,7 @@ class OWSVMClassification(widget.OWWidget):
 
         self.apply()
 
+    @check_sql_input
     def set_data(self, data):
         """Set the input train data set."""
         self.data = data

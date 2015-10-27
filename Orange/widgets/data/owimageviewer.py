@@ -31,7 +31,7 @@ from PyQt4.QtNetwork import (
 import Orange.data
 from Orange.widgets import widget, gui, settings
 from Orange.widgets.utils.itemmodels import VariableListModel
-from Orange.widgets.io import FileFormats
+from Orange.widgets.io import FileFormat
 
 # from OWConcurrent import Future, FutureWatcher
 from concurrent.futures import Future
@@ -338,8 +338,8 @@ class OWImageViewer(widget.OWWidget):
     show_save_graph = True
     want_graph = True
 
-    def __init__(self, parent=None):
-        super().__init__(parent)
+    def __init__(self):
+        super().__init__()
 
         self.info = gui.widgetLabel(
             gui.widgetBox(self.controlArea, "Info"),
@@ -351,7 +351,8 @@ class OWImageViewer(widget.OWWidget):
             box="Image Filename Attribute",
             tooltip="Attribute with image filenames",
             callback=[self.clearScene, self.setupScene],
-            addSpace=True
+            contentsLength=12,
+            addSpace=True,
         )
 
         self.titleAttrCB = gui.comboBox(
@@ -359,6 +360,7 @@ class OWImageViewer(widget.OWWidget):
             box="Title Attribute",
             tooltip="Attribute with image title",
             callback=self.updateTitles,
+            contentsLength=12,
             addSpace=True
         )
 
@@ -599,8 +601,8 @@ class OWImageViewer(widget.OWWidget):
     def saveScene(self):
         from Orange.widgets.data.owsave import OWSave
 
-        save_img = OWSave(parent=self, data=self.scene,
-                          file_formats=FileFormats.img_writers)
+        save_img = OWSave(data=self.scene,
+                          file_formats=FileFormat.img_writers)
         save_img.exec_()
 
     def _updateStatus(self, future):

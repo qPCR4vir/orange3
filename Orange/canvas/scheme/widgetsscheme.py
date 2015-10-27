@@ -47,10 +47,10 @@ class WidgetsScheme(Scheme):
     (creation/deletion, etc.) of `OWBaseWidget` instances corresponding to
     the nodes in the scheme. It also delegates the interwidget signal
     propagation to an instance of `WidgetsSignalManager`.
-
     """
-    def __init__(self, parent=None, title=None, description=None):
-        Scheme.__init__(self, parent, title, description)
+
+    def __init__(self, parent=None, title=None, description=None, env={}):
+        Scheme.__init__(self, parent, title, description, env=env)
 
         self.signal_manager = WidgetsSignalManager(self)
         self.widget_manager = WidgetManager()
@@ -166,6 +166,7 @@ class WidgetManager(QObject):
         )
         scheme.node_added.connect(self.add_widget_for_node)
         scheme.node_removed.connect(self.remove_widget_for_node)
+        scheme.runtime_env_changed.connect(self.__on_env_changed)
         scheme.installEventFilter(self)
 
     def scheme(self):
@@ -256,6 +257,7 @@ class WidgetManager(QObject):
             self.__widgets.remove(state.widget)
             del self.__initstate_for_node[node]
             del self.__widget_for_node[node]
+            del self.__node_for_widget[state.widget]
             node.title_changed.disconnect(state.widget.setCaption)
             state.widget.progressBarValueChanged.disconnect(node.set_progress)
 
@@ -297,7 +299,10 @@ class WidgetManager(QObject):
             klass,
             None,
             signal_manager=self.signal_manager(),
-            stored_settings=node.properties
+            stored_settings=node.properties,
+            # NOTE: env is a view of the real env and reflects
+            # changes to the environment.
+            env=self.scheme().runtime_env()
         )
 
         # Init the node/widget mapping and state before calling __init__
@@ -537,6 +542,11 @@ class WidgetManager(QObject):
             widget.deleteLater()
             del self.__widget_processing_state[widget]
 
+    def __on_env_changed(self, key, newvalue, oldvalue):
+        # Notify widgets of a runtime environment change
+        for widget in self.__widget_for_node.values():
+            widget.workflowEnvChanged(key, newvalue, oldvalue)
+
 
 def user_message_from_state(widget, message_type, message_id, message_value):
     message_type = str(message_type)
@@ -607,7 +617,9 @@ class WidgetsSignalManager(SignalManager):
         SignalManager.send(self, node, channel, value, signal_id)
 
     def is_blocking(self, node):
-        return self.scheme().widget_manager.node_processing_state(node) != 0
+        """Reimplemented from `SignalManager`"""
+        return (self.scheme().widget_manager.node_processing_state(node) &
+                (WidgetManager.InputUpdate | WidgetManager.BlockingUpdate))
 
     def send_to_node(self, node, signals):
         """

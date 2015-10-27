@@ -8,15 +8,16 @@ from Orange.data import Table
 from Orange.regression import SVRLearner, NuSVRLearner, SklModel
 from Orange.preprocess.preprocess import Preprocess
 from Orange.widgets import widget, settings, gui
+from Orange.widgets.utils.sql import check_sql_input
 
 
 class OWSVMRegression(widget.OWWidget):
-    name = "SVM"
+    name = "SVM Regression"
     description = "Support vector machine regression algorithm."
     icon = "icons/SVMRegression.svg"
     inputs = [("Data", Table, "set_data"),
               ("Preprocessor", Preprocess, "set_preprocessor")]
-    outputs = [("Learner", SVRLearner),
+    outputs = [("Learner", SVRLearner, widget.Default),
                ("Predictor", SklModel),
                ("Support vectors", Table)]
 
@@ -52,8 +53,8 @@ class OWSVMRegression(widget.OWWidget):
     want_main_area = False
     resizing_enabled = False
 
-    def __init__(self, parent=None):
-        super().__init__(parent)
+    def __init__(self):
+        super().__init__()
 
         self.data = None
         self.preprocessors = None
@@ -142,6 +143,7 @@ class OWSVMRegression(widget.OWWidget):
 
         self.apply()
 
+    @check_sql_input
     def set_data(self, data):
         """Set the input train data set."""
         self.data = data

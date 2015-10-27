@@ -6,6 +6,7 @@ import numpy as np
 
 from PyQt4 import QtCore
 from PyQt4 import QtGui
+from PyQt4.QtGui import QSizePolicy
 
 import scipy.special
 
@@ -16,7 +17,7 @@ from Orange.widgets import widget, gui
 from Orange.widgets.settings import (Setting, DomainContextHandler,
                                      ContextSetting)
 from Orange.widgets.utils import datacaching, colorpalette, vartype
-from Orange.widgets.io import FileFormats
+from Orange.widgets.io import FileFormat
 
 
 def compute_scale(min_, max_):
@@ -146,7 +147,7 @@ class OWBoxPlot(widget.OWWidget):
         self.posthoc_lines = []
 
         self.label_txts = self.mean_labels = self.boxes = self.labels = \
-            self.attr_labels = self.order = []
+            self.label_txts_all = self.attr_labels = self.order = []
         self.p = -1.0
         self.scale_x = self.scene_min_x = self.scene_width = 0
         self.label_width = 0
@@ -154,13 +155,17 @@ class OWBoxPlot(widget.OWWidget):
         self.attr_list_box = gui.listBox(
             self.controlArea, self, "attributes_select", "attributes",
             box="Variable", callback=self.attr_changed,
-            sizeHint=QtCore.QSize(200, 250))
+            sizeHint=QtCore.QSize(200, 150))
+        self.attr_list_box.setSizePolicy(QSizePolicy.Fixed,
+                                         QSizePolicy.MinimumExpanding)
 
         box = gui.widgetBox(self.controlArea, "Grouping")
         self.group_list_box = gui.listBox(
             box, self, 'grouping_select', "grouping",
             callback=self.attr_changed,
-            sizeHint=QtCore.QSize(200, 150))
+            sizeHint=QtCore.QSize(200, 100))
+        self.group_list_box.setSizePolicy(QSizePolicy.Fixed,
+                                          QSizePolicy.MinimumExpanding)
 
         # TODO: move Compare median/mean to grouping box
         self.display_box = gui.widgetBox(self.controlArea, "Display")
@@ -175,8 +180,6 @@ class OWBoxPlot(widget.OWWidget):
         self.stretching_box = gui.checkBox(
             self.controlArea, self, 'stretched', "Stretch bars", box='Display',
             callback=self.display_changed).box
-
-        gui.rubber(self.controlArea)
 
         gui.widgetBox(self.mainArea, addSpace=True)
         self.box_scene = QtGui.QGraphicsScene()
@@ -273,14 +276,17 @@ class OWBoxPlot(widget.OWWidget):
                 (dataset, attr_ind, group_ind))
             if self.is_continuous:
                 self.stats = [BoxData(cont) for cont in self.conts]
-            self.label_txts = dataset.domain[group_ind].values
+            self.label_txts_all = dataset.domain[group_ind].values
         else:
             self.dist = datacaching.getCached(
                 dataset, distribution.get_distribution, (dataset, attr_ind))
             self.conts = []
             if self.is_continuous:
                 self.stats = [BoxData(self.dist)]
-            self.label_txts = [""]
+            self.label_txts_all = [""]
+        self.label_txts = [txts for stat, txts in zip(self.stats,
+                                                      self.label_txts_all)
+                           if stat.N > 0]
         self.stats = [stat for stat in self.stats if stat.N > 0]
 
     def update_display_box(self):
@@ -376,7 +382,7 @@ class OWBoxPlot(widget.OWWidget):
     def display_changed_disc(self):
         self.clear_scene()
         self.attr_labels = [QtGui.QGraphicsSimpleTextItem(lab)
-                            for lab in self.label_txts]
+                            for lab in self.label_txts_all]
 
         if not self.stretched:
             if self.grouping_select[0]:
@@ -392,6 +398,9 @@ class OWBoxPlot(widget.OWWidget):
         else:
             self.disc_palette.set_number_of_colors(len(self.dist))
             self.boxes = [self.strudel(self.dist)]
+
+        selected_grouping = self.grouping[self.grouping_select[0]][0]
+        selected_attribute = self.attributes[self.attributes_select[0]][0]
 
         for row, box in enumerate(self.boxes):
             y = (-len(self.boxes) + row) * 40 + 10
@@ -410,6 +419,15 @@ class OWBoxPlot(widget.OWWidget):
                     right = self.scale_x * sum(self.dist)
                 label.setPos(right + 10, y - b.height() / 2)
                 self.box_scene.addItem(label)
+
+            if selected_attribute != selected_grouping:
+                selected_attr = self.dataset.domain[self.attributes_select[0]]
+                for label_text, bar_part in zip(selected_attr.values,
+                                                box.childItems()):
+                    label = QtGui.QGraphicsSimpleTextItem(label_text)
+                    label.setPos(bar_part.boundingRect().x(),
+                                 y - label.boundingRect().height() - 8)
+                    self.box_scene.addItem(label)
 
         self.box_scene.setSceneRect(-self.label_width - 5,
                                    -30 - len(self.boxes) * 40,
@@ -769,8 +787,8 @@ class OWBoxPlot(widget.OWWidget):
     def save_graph(self):
         from Orange.widgets.data.owsave import OWSave
 
-        save_img = OWSave(parent=self, data=self.box_scene,
-                          file_formats=FileFormats.img_writers)
+        save_img = OWSave(data=self.box_scene,
+                          file_formats=FileFormat.img_writers)
         save_img.exec_()
 
 

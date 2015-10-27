@@ -18,7 +18,7 @@ import Orange
 from Orange.widgets import widget, gui, settings
 from Orange.widgets.utils import colorpalette, colorbrewer
 from Orange.widgets.evaluate.owrocanalysis import convex_hull
-from Orange.widgets.io import FileFormats
+from Orange.widgets.io import FileFormat
 
 
 CurvePoints = namedtuple(
@@ -70,8 +70,8 @@ class OWLiftCurve(widget.OWWidget):
 
     want_graph = True
 
-    def __init__(self, parent=None):
-        super().__init__(parent)
+    def __init__(self):
+        super().__init__()
 
         self.results = None
         self.classifier_names = []
@@ -83,7 +83,8 @@ class OWLiftCurve(widget.OWWidget):
         tbox.setFlat(True)
 
         self.target_cb = gui.comboBox(
-            tbox, self, "target_index", callback=self._on_target_changed)
+            tbox, self, "target_index", callback=self._on_target_changed,
+            contentsLength=8)
 
         cbox = gui.widgetBox(box, "Classifiers")
         cbox.setFlat(True)
@@ -223,8 +224,8 @@ class OWLiftCurve(widget.OWWidget):
     def save_graph(self):
         from Orange.widgets.data.owsave import OWSave
 
-        save_img = OWSave(parent=self, data=self.plot,
-                          file_formats=FileFormats.img_writers)
+        save_img = OWSave(data=self.plot,
+                          file_formats=FileFormat.img_writers)
         save_img.exec_()
 
 

@@ -16,7 +16,8 @@ from scipy import sparse as sp
 
 from .instance import *
 from Orange.util import flatten
-from Orange.data import (Domain, io, Variable, StringVariable)
+from Orange.data import Domain, io, Variable, StringVariable
+from Orange.data.io import FileFormat
 from Orange.data.storage import Storage
 from . import _contingency
 from . import _valuecount
@@ -402,7 +403,7 @@ class Table(MutableSequence, Storage):
         if W is None or W.size == 0:
             W = np.empty((X.shape[0], 0))
         else:
-            W = W.reshape(W.size, 1)
+            W = W.reshape(W.size)
 
         if X.shape[1] != len(domain.attributes):
             raise ValueError(
@@ -467,10 +468,6 @@ class Table(MutableSequence, Storage):
             cls._next_instance_id += 1
             return id
 
-    FILE_FORMATS = {
-        ".tab": (io.TabDelimFormat, )
-    }
-
     def save(self, filename):
         """
         Save a data table to a file. The path can be absolute or relative.
@@ -479,9 +476,9 @@ class Table(MutableSequence, Storage):
         :type filename: str
         """
         ext = os.path.splitext(filename)[1]
-        writer = io.FileFormats.writers.get(ext)
+        writer = FileFormat.writers.get(ext)
         if not writer:
-            desc = io.FileFormats.names.get(ext)
+            desc = FileFormat.names.get(ext)
             if desc:
                 raise IOError("Writing of {}s is not supported".
                     format(desc.lower()))
@@ -489,8 +486,8 @@ class Table(MutableSequence, Storage):
                 raise IOError("Unknown file name extension.")
         writer().write_file(filename, self)
 
-    @classmethod
-    def from_file(cls, filename):
+    @staticmethod
+    def from_file(filename, wrapper=None):
         """
         Read a data table from a file. The path can be absolute or relative.
 
@@ -500,13 +497,15 @@ class Table(MutableSequence, Storage):
         :rtype: Orange.data.Table
         """
         for dir in dataset_dirs:
-            ext = os.path.splitext(filename)[1]
             absolute_filename = os.path.join(dir, filename)
-            if not ext:
-                for ext in io.FileFormats.readers:
-                    if os.path.exists(absolute_filename + ext):
-                        absolute_filename += ext
-                        break
+            if os.path.exists(absolute_filename):
+                break
+            for ext in FileFormat.readers:
+                if filename.endswith(ext):
+                    break
+                if os.path.exists(absolute_filename + ext):
+                    absolute_filename += ext
+                    break
             if os.path.exists(absolute_filename):
                 break
         else:
@@ -514,15 +513,7 @@ class Table(MutableSequence, Storage):
 
         if not os.path.exists(absolute_filename):
             raise IOError('File "{}" was not found.'.format(filename))
-        reader = io.FileFormats.readers.get(ext)
-        if not reader:
-            desc = io.FileFormats.names.get(ext)
-            if desc:
-                raise IOError("Reading {}s is not supported".
-                    format(desc.lower()))
-            else:
-                raise IOError("Unknown file name extension.")
-        data = reader().read_file(absolute_filename, cls)
+        data = FileFormat.read(absolute_filename, wrapper)
         data.name = os.path.splitext(os.path.split(filename)[-1])[0]
         # no need to call _init_ids as fuctions from .io already
         # construct a table with .ids
@@ -1304,6 +1295,7 @@ class Table(MutableSequence, Storage):
             row_data = self._Y[:, row_indi - n_atts]
 
         W = self.W if self.has_weights() else None
+        nan_inds = None
 
         col_desc = [self.domain[var] for var in col_vars]
         col_indi = [self.domain.index(var) for var in col_vars]
@@ -1313,16 +1305,25 @@ class Table(MutableSequence, Storage):
             raise ValueError("contingency can be computed only for discrete "
                              "and continuous values")
 
-        if any(var.is_continuous for var in col_desc):
-            if bn.countnans(row_data):
-                raise ValueError("cannot compute contigencies with missing "
-                                 "row data")
+        if row_data.dtype.kind != "f": #meta attributes can be stored as type object
+            row_data = row_data.astype(float)
+
+        unknown_rows = bn.countnans(row_data)
+        if unknown_rows:
+            nan_inds = np.isnan(row_data)
+            row_data = row_data[~nan_inds]
+            if W:
+                W = W[~nan_inds]
+                unknown_rows = np.sum(W[nan_inds])
 
         contingencies = [None] * len(col_desc)
         for arr, f_cond, f_ind in (
                 (self.X, lambda i: 0 <= i < n_atts, lambda i: i),
                 (self._Y, lambda i: i >= n_atts, lambda i: i - n_atts),
                 (self.metas, lambda i: i < 0, lambda i: -1 - i)):
+
+            if nan_inds is not None:
+                arr = arr[~nan_inds]
 
             arr_indi = [e for e, ind in enumerate(col_indi) if f_cond(ind)]
 
@@ -1367,7 +1368,7 @@ class Table(MutableSequence, Storage):
                         col_data, classes_, n_rows, W_)
                     contingencies[col_i] = ([U, C], unknown)
 
-        return contingencies
+        return contingencies, unknown_rows
 
 
 def _check_arrays(*arrays, dtype=None):

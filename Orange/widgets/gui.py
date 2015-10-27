@@ -1701,6 +1701,60 @@ def valueSlider(widget, master, value, box=None, label=None,
     return slider
 
 
+class OrangeComboBox(QtGui.QComboBox):
+    """
+    A QtGui.QComboBox subclass extened to support bounded contents width hint.
+    """
+    def __init__(self, parent=None, maximumContentsLength=-1, **kwargs):
+        super().__init__(parent, **kwargs)
+        self.__maximumContentsLength = maximumContentsLength
+
+    def setMaximumContentsLength(self, length):
+        """
+        Set the maximum contents length hint.
+
+        The hint specifies the upper bound on the `sizeHint` and
+        `minimumSizeHint` width specified in character length.
+        Set to 0 or negative value to disable.
+
+        .. note::
+             This property does not affect the widget's `maximumSize`.
+             The widget can still grow depending in it's sizePolicy.
+
+        Parameters
+        ----------
+        lenght : int
+            Maximum contents length hint.
+        """
+        if self.__maximumContentsLength != length:
+            self.__maximumContentsLength = length
+            self.updateGeometry()
+
+    def maximumContentsLength(self):
+        """
+        Return the maximum contents length hint.
+        """
+        return self.__maximumContentsLength
+
+    def sizeHint(self):
+        # reimplemented
+        sh = super().sizeHint()
+        if self.__maximumContentsLength > 0:
+            width = (self.fontMetrics().width("X") * self.__maximumContentsLength
+                     + self.iconSize().width() + 4)
+            sh = sh.boundedTo(QtCore.QSize(width, sh.height()))
+        return sh
+
+    def minimumSizeHint(self):
+        # reimplemented
+        sh = super().minimumSizeHint()
+        if self.__maximumContentsLength > 0:
+            width = (self.fontMetrics().width("X") * self.__maximumContentsLength
+                     + self.iconSize().width() + 4)
+            sh = sh.boundedTo(QtCore.QSize(width, sh.height()))
+        return sh
+
+
 # TODO comboBox looks overly complicated:
 # - is the argument control2attributeDict needed? doesn't emptyString do the
 #    job?
@@ -1710,6 +1764,7 @@ def comboBox(widget, master, value, box=None, label=None, labelWidth=None,
              orientation='vertical', items=(), callback=None,
              sendSelectedValue=False, valueType=str,
              control2attributeDict=None, emptyString=None, editable=False,
+             contentsLength=None, maximumContentsLength=25,
              **misc):
     """
     Construct a combo box.
@@ -1753,6 +1808,15 @@ def comboBox(widget, master, value, box=None, label=None, labelWidth=None,
     :type emptyString: str
     :param editable: a flag telling whether the combo is editable
     :type editable: bool
+    :param int contentsLength: Contents character length to use as a
+        fixed size hint. When not None, equivalent to::
+
+            combo.setSizeAdjustPolicy(
+                QComboBox.AdjustToMinimumContentsLengthWithIcon)
+            combo.setMinimumContentsLength(contentsLength)
+    :param int maximumContentsLength: Specifies the upper bound on the
+        `sizeHint` and `minimumSizeHint` width specified in character
+        length (default: 25, use 0 to disable)
     :rtype: PyQt4.QtGui.QComboBox
     """
     if box or label:
@@ -1761,8 +1825,16 @@ def comboBox(widget, master, value, box=None, label=None, labelWidth=None,
             widgetLabel(hb, label, labelWidth)
     else:
         hb = widget
-    combo = QtGui.QComboBox(hb)
-    combo.setEditable(editable)
+
+    combo = OrangeComboBox(
+        hb, maximumContentsLength=maximumContentsLength,
+        editable=editable)
+
+    if contentsLength is not None:
+        combo.setSizeAdjustPolicy(
+            QtGui.QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        combo.setMinimumContentsLength(contentsLength)
+
     combo.box = hb
     for item in items:
         if isinstance(item, (tuple, list)):
@@ -2241,8 +2313,10 @@ def auto_commit(widget, master, value, label, auto_label=None, box=True,
                       addToLayout=False)
         b.setSizePolicy(QtGui.QSizePolicy.Preferred, QtGui.QSizePolicy.Maximum)
 
-    b.checkbox = cb = checkBox(b, master, value, checkbox_label or " ",
+    b.checkbox = cb = checkBox(b, master, value, checkbox_label,
                                callback=u, tooltip=auto_label)
+    if checkbox_label and orientation == 'horizontal' or not orientation:
+        b.layout().insertSpacing(-1, 10)
     cb.setSizePolicy(QtGui.QSizePolicy.Preferred, QtGui.QSizePolicy.Preferred)
     b.button = btn = button(b, master, label, callback=do_commit)
     if not checkbox_label:
@@ -3096,6 +3170,86 @@ class ColoredBarItemDelegate(QtGui.QStyledItemDelegate):
         if not isinstance(bar_brush, (QtGui.QColor, QtGui.QBrush)):
             bar_brush = self.color
         return QtGui.QBrush(bar_brush)
+
+
+class VerticalLabel(QtGui.QLabel):
+    def __init__(self, text, parent=None):
+        super().__init__(text, parent)
+        self.setSizePolicy(QtGui.QSizePolicy.Preferred,
+                           QtGui.QSizePolicy.MinimumExpanding)
+        self.setMaximumWidth(self.sizeHint().width() + 2)
+        self.setMargin(4)
+
+    def sizeHint(self):
+        metrics = QtGui.QFontMetrics(self.font())
+        rect = metrics.boundingRect(self.text())
+        size = QtCore.QSize(rect.height() + self.margin(),
+                            rect.width() + self.margin())
+        return size
+
+    def setGeometry(self, rect):
+        super().setGeometry(rect)
+
+    def paintEvent(self, event):
+        painter = QtGui.QPainter(self)
+        rect = self.geometry()
+        text_rect = QtCore.QRect(0, 0, rect.width(), rect.height())
+
+        painter.translate(text_rect.bottomLeft())
+        painter.rotate(-90)
+        painter.drawText(
+            QtCore.QRect(QtCore.QPoint(0, 0),
+                         QtCore.QSize(rect.height(), rect.width())),
+            Qt.AlignCenter, self.text())
+        painter.end()
+
+
+class VerticalItemDelegate(QtGui.QStyledItemDelegate):
+    # Extra text top/bottom margin.
+    Margin = 6
+
+    def sizeHint(self, option, index):
+        sh = super().sizeHint(option, index)
+        return QtCore.QSize(sh.height() + self.Margin * 2, sh.width())
+
+    def paint(self, painter, option, index):
+        option = QtGui.QStyleOptionViewItemV4(option)
+        self.initStyleOption(option, index)
+
+        if not option.text:
+            return
+
+        if option.widget is not None:
+            style = option.widget.style()
+        else:
+            style = QtGui.QApplication.style()
+        style.drawPrimitive(
+            QtGui.QStyle.PE_PanelItemViewRow, option, painter,
+            option.widget)
+        cell_rect = option.rect
+        itemrect = QtCore.QRect(0, 0, cell_rect.height(), cell_rect.width())
+        opt = QtGui.QStyleOptionViewItemV4(option)
+        opt.rect = itemrect
+        textrect = style.subElementRect(
+            QtGui.QStyle.SE_ItemViewItemText, opt, opt.widget)
+
+        painter.save()
+        painter.setFont(option.font)
+
+        if option.displayAlignment & (Qt.AlignTop | Qt.AlignBottom):
+            brect = painter.boundingRect(
+                textrect, option.displayAlignment, option.text)
+            diff = textrect.height() - brect.height()
+            offset = max(min(diff / 2, self.Margin), 0)
+            if option.displayAlignment & Qt.AlignBottom:
+                offset = -offset
+
+            textrect.translate(0, offset)
+
+        painter.translate(option.rect.x(), option.rect.bottom())
+        painter.rotate(-90)
+        painter.drawText(textrect, option.displayAlignment, option.text)
+        painter.restore()
 
 ##############################################################################
 # progress bar management
