@@ -2,14 +2,17 @@ import sys
 
 import psycopg2
 from PyQt4 import QtGui
-from PyQt4.QtCore import Qt
+from PyQt4.QtCore import Qt, QTimer
 from PyQt4.QtGui import QApplication, QCursor, QMessageBox
 
 from Orange.data import Table
-from Orange.data.sql.table import SqlTable, LARGE_TABLE
+from Orange.data.sql.table import SqlTable, LARGE_TABLE, AUTO_DL_LIMIT
 from Orange.widgets import widget, gui
 from Orange.widgets.settings import Setting
 from Orange.widgets.widget import OutputSignal
+
+
+MAX_DL_LIMIT = 1000000
 
 
 class OWSql(widget.OWWidget):
@@ -40,6 +43,10 @@ class OWSql(widget.OWWidget):
     table = Setting(None)
     sql = Setting("")
     guess_values = Setting(True)
+    download = Setting(False)
+
+    materialize = Setting(False)
+    materialize_table_name = Setting("")
 
     def __init__(self):
         super().__init__()
@@ -91,17 +98,26 @@ class OWSql(widget.OWWidget):
         self.sqltext.setPlainText(self.sql)
         self.custom_sql.layout().addWidget(self.sqltext)
 
+        mt = gui.widgetBox(self.custom_sql, orientation='horizontal')
+        gui.checkBox(mt, self, 'materialize', 'materialize to table ')
+        gui.lineEdit(mt, self, 'materialize_table_name')
+
         self.executebtn = gui.button(
             self.custom_sql, self, 'Execute', callback=self.open_table)
 
         box.layout().addWidget(self.custom_sql)
 
         gui.checkBox(box, self, "guess_values",
-                     "Auto-discover discrete variables.",
+                     "Auto-discover discrete variables",
                      callback=self.open_table)
+
+        gui.checkBox(box, self, "download",
+                     "Download data to local memory",
+                     callback=self.open_table)
+
         self.connect()
         if self.table:
-            self.open_table()
+            QTimer.singleShot(0, self.open_table)
 
     def error(self, id=0, text=""):
         super().error(id, text)
@@ -182,15 +198,35 @@ class OWSql(widget.OWWidget):
         if self.tablecombo.currentIndex() < self.tablecombo.count() - 1:
             self.table = self.tablecombo.currentText()
         else:
-            self.table = self.sqltext.toPlainText()
+            self.sql = self.table = self.sqltext.toPlainText()
+            if self.materialize:
+                try:
+                    cur = self._connection.cursor()
+                    cur.execute("DROP TABLE IF EXISTS " + self.materialize_table_name)
+                    cur.execute("CREATE TABLE " + self.materialize_table_name + " AS " + self.table)
+                    cur.execute("ANALYZE " + self.materialize_table_name)
+                    self.table = self.materialize_table_name
+                except psycopg2.ProgrammingError as ex:
+                    self.error(0, str(ex))
+                    return
+                finally:
+                    self._connection.commit()
 
-        table = SqlTable(dict(host=self.host,
-                              port=self.port,
-                              database=self.database,
-                              user=self.username,
-                              password=self.password),
-                         self.table,
-                         inspect_values=False)
+        try:
+            table = SqlTable(dict(host=self.host,
+                                  port=self.port,
+                                  database=self.database,
+                                  user=self.username,
+                                  password=self.password),
+                             self.table,
+                             inspect_values=False)
+        except psycopg2.ProgrammingError as ex:
+            self.error(0, str(ex))
+            return
+
+        self.error(0)
+
+
         sample = False
         if table.approx_len() > LARGE_TABLE and self.guess_values:
             confirm = QMessageBox(self)
@@ -220,6 +256,24 @@ class OWSql(widget.OWWidget):
                 domain = table.get_domain(guess_values=True)
             QApplication.restoreOverrideCursor()
             table.domain = domain
+
+        if self.download:
+            if table.approx_len() > MAX_DL_LIMIT:
+                QMessageBox.warning(
+                    self, 'Warning', "Data is too big to download.\n"
+                    "Consider using the Data Sampler widget to download "
+                    "a sample instead.")
+                self.download = False
+            elif table.approx_len() > AUTO_DL_LIMIT:
+                confirm = QMessageBox.question(
+                    self, 'Question', "Data appears to be big. Do you really "
+                                      "want to download it to local memory?",
+                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+                if confirm == QMessageBox.No:
+                    self.download = False
+        if self.download:
+            table.download_data(MAX_DL_LIMIT)
+            table = Table(table)
 
         self.send("Data", table)
 

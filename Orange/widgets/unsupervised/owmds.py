@@ -1,29 +1,24 @@
+from itertools import chain
+import pkg_resources
 import sys
 import warnings
 from xml.sax.saxutils import escape
 
-import pkg_resources
-
 import numpy
 import scipy.spatial.distance
-from itertools import chain
-
 from PyQt4 import QtGui
 from PyQt4.QtCore import Qt, QEvent
-
 import pyqtgraph as pg
 import pyqtgraph.graphicsItems.ScatterPlotItem
-
-from Orange.widgets import widget, gui, settings
-from Orange.widgets.utils import colorpalette
-
-from Orange.widgets.utils import itemmodels
 
 import Orange.data
 import Orange.projection
 import Orange.distance
 import Orange.misc
+from Orange.widgets import widget, gui, settings
 from Orange.widgets.io import FileFormat
+from Orange.widgets.utils import colorpalette, itemmodels
+from Orange.widgets.utils.sql import check_sql_input
 
 
 def torgerson(distances, n_components=2):
@@ -98,8 +93,8 @@ class OWMDS(widget.OWWidget):
     icon = "icons/MDS.svg"
     inputs = [("Data", Orange.data.Table, "set_data"),
               ("Distances", Orange.misc.DistMatrix, "set_disimilarity")]
-    outputs = [("Data", Orange.data.Table, widget.Default),
-               ("Selected Data", Orange.data.Table)]
+    outputs = [("Selected Data", Orange.data.Table, widget.Default),
+               ("Data", Orange.data.Table)]
 
     #: Initialization type
     PCA, Random = 0, 1
@@ -114,6 +109,13 @@ class OWMDS(widget.OWWidget):
         ("None", -1)
     ]
 
+    JitterAmount = [
+        ("None", 0),
+        ("0.1%", 0.1),
+        ("0.5%", 0.5),
+        ("1%", 1.0),
+        ("2%", 2.0)
+    ]
     #: Runtime state
     Running, Finished, Waiting = 1, 2, 3
 
@@ -137,7 +139,7 @@ class OWMDS(widget.OWWidget):
     symbol_size = settings.Setting(8)
     symbol_opacity = settings.Setting(230)
     connected_pairs = settings.Setting(5)
-    spread_equal_points = settings.Setting(False)
+    jitter = settings.Setting(0)
 
     legend_anchor = settings.Setting(((1, 0), (1, 0)))
 
@@ -188,10 +190,6 @@ class OWMDS(widget.OWWidget):
                         box, self, "refresh_rate",
                         items=[t for t, _ in OWMDS.RefreshRate],
                         callback=self.__invalidate_refresh))
-        gui.separator(box, 10)
-        gui.checkBox(box, self, "spread_equal_points",
-                     "Spread points at zero-distances",
-                     callback=self.__invalidate_embedding)
         gui.separator(box, 10)
         self.runbutton = gui.button(
             box, self, "Run", callback=self._toggle_run)
@@ -249,6 +247,12 @@ class OWMDS(widget.OWWidget):
                         self, "connected_pairs", minValue=0, maxValue=20,
                         createLabel=False,
                         callback=self._on_connected_changed))
+        form.addRow("Jitter",
+                    gui.comboBox(
+                        box, self, "jitter",
+                        items=[text for text, _ in self.JitterAmount],
+                        callback=self._update_plot))
+
         box.layout().addLayout(form)
 
         gui.rubber(self.controlArea)
@@ -346,6 +350,7 @@ class OWMDS(widget.OWWidget):
 
         self._initialize()
 
+    @check_sql_input
     def set_data(self, data):
         self.signal_data = data
 
@@ -492,9 +497,6 @@ class OWMDS(widget.OWWidget):
     def __start(self):
         self.__draw_similar_pairs = False
         X = self._effective_matrix
-        if self.spread_equal_points:
-            maxval = numpy.max(X)
-            X = numpy.clip(X, maxval / 10, maxval)
 
         if self.embedding is not None:
             init = self.embedding
@@ -709,6 +711,17 @@ class OWMDS(widget.OWWidget):
             else:
                 return numpy.zeros_like(a)
 
+        def jitter(x, factor=1, rstate=None):
+            if rstate is None:
+                rstate = numpy.random.RandomState()
+            elif not isinstance(rstate, numpy.random.RandomState):
+                rstate = numpy.random.RandomState(rstate)
+            span = numpy.nanmax(x) - numpy.nanmin(x)
+            if span < numpy.finfo(x.dtype).eps * 100:
+                span = 1
+            a = factor * span / 100.
+            return x + (rstate.random_sample(x.shape) - 0.5) * a
+
         if self._pen_data is None:
             if self._selection_mask is not None:
                 pointflags = numpy.where(
@@ -822,6 +835,10 @@ class OWMDS(widget.OWWidget):
             self._label_data = label_items
 
         emb_x, emb_y = self.embedding[:, 0], self.embedding[:, 1]
+        if self.jitter > 0:
+            _, jitter_factor = self.JitterAmount[self.jitter]
+            emb_x = jitter(emb_x, jitter_factor, amount=0, rstate=42)
+            emb_y = jitter(emb_y, jitter_factor, amount=0, rstate=667)
 
         if self.connected_pairs and self.__draw_similar_pairs:
             if self._similar_pairs is None:

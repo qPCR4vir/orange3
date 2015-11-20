@@ -323,14 +323,16 @@ class SqlTable(table.Table):
         """Download SQL data and store it in memory as numpy matrices."""
         if limit and not partial and self.approx_len() > limit:
             raise ValueError("Too many rows to download the data into memory.")
-        X, Y, metas = [], [], []
+        X = [np.empty((0, len(self.domain.attributes)))]
+        Y = [np.empty((0, len(self.domain.class_vars)))]
+        metas = [np.empty((0, len(self.domain.metas)))]
         for row in islice(self, limit):
             X.append(row._x)
             Y.append(row._y)
             metas.append(row._metas)
-        self._X = np.vstack(X)
-        self._Y = np.vstack(Y)
-        self._metas = np.vstack(metas)
+        self._X = np.vstack(X).astype(np.float64)
+        self._Y = np.vstack(Y).astype(np.float64)
+        self._metas = np.vstack(metas).astype(object)
         self._W = np.empty((self._X.shape[0], 0))
         self._init_ids(self)
         if not partial or limit and self._X.shape[0] < limit:
@@ -600,9 +602,12 @@ class SqlTable(table.Table):
 
     # sql queries
     def _sql_query(self, fields, filters=(),
-                   group_by=None, order_by=None, offset=None, limit=None):
+                   group_by=None, order_by=None, offset=None, limit=None,
+                   use_time_sample=None):
         sql = ["SELECT", ', '.join(fields),
                "FROM", self.table_name]
+        if use_time_sample is not None:
+            sql.append("TABLESAMPLE system_time(%i)" % use_time_sample)
         row_filters = [f.to_sql() for f in self.row_filters]
         row_filters.extend(filters)
         if row_filters:
@@ -718,7 +723,7 @@ class SqlRowInstance(instance.Instance):
         nvar = len(domain.variables)
         super().__init__(domain, data[:nvar])
         if len(data) > nvar:
-            self._metas = data[nvar:]
+            self._metas = np.asarray(data[nvar:], dtype=object)
 
 
 class ToSql:

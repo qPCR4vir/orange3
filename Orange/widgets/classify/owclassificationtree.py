@@ -17,11 +17,12 @@ class OWClassificationTree(widget.OWWidget):
 
     outputs = [
         ("Learner", TreeLearner),
-        ("Classification Tree", TreeClassifier)
+        ("Tree", TreeClassifier)
     ]
     want_main_area = False
     resizing_enabled = False
 
+    LEARNER = TreeLearner
     model_name = Setting("Classification Tree")
     attribute_score = Setting(0)
     limit_min_leaf = Setting(True)
@@ -39,7 +40,7 @@ class OWClassificationTree(widget.OWWidget):
         self.data = None
         self.learner = None
         self.preprocessors = None
-        self.classifier = None
+        self.model = None
 
         gui.lineEdit(self.controlArea, self, 'model_name', box='Name',
                      tooltip='The name will identify this model in other '
@@ -78,27 +79,28 @@ class OWClassificationTree(widget.OWWidget):
         self.reportData(self.data)
 
     def set_learner(self):
-        self.learner = TreeLearner(
+        self.learner = self.LEARNER(
             criterion=self.scores[self.attribute_score][1],
-            max_depth=self.max_depth,
-            min_samples_split=self.min_internal,
-            min_samples_leaf=self.min_leaf,
+            max_depth=self.max_depth if self.limit_depth else None,
+            min_samples_split=(self.min_internal if self.limit_min_internal
+                               else 2),
+            min_samples_leaf=(self.min_leaf if self.limit_min_leaf else 1),
             preprocessors=self.preprocessors
         )
         self.learner.name = self.model_name
-        self.classifier = None
+        self.model = None
 
         if self.data is not None:
             self.error(1)
             if not self.learner.check_learner_adequacy(self.data.domain):
                 self.error(1, self.learner.learner_adequacy_err_msg)
             else:
-                self.classifier = self.learner(self.data)
-                self.classifier.name = self.model_name
-                self.classifier.instances = self.data
+                self.model = self.learner(self.data)
+                self.model.name = self.model_name
+                self.model.instances = self.data
 
         self.send("Learner", self.learner)
-        self.send("Classification Tree", self.classifier)
+        self.send("Tree", self.model)
 
     @check_sql_input
     def set_data(self, data):

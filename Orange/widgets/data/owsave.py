@@ -9,7 +9,7 @@ from Orange.data.io import FileFormat
 
 
 class OWSave(widget.OWWidget):
-    name = "Save"
+    name = "Save Data"
     description = "Save data to an output file."
     icon = "icons/Save.svg"
     author = "Martin Frlin"
@@ -58,7 +58,7 @@ class OWSave(widget.OWWidget):
         home_dir = os.path.expanduser("~")
         filename = QtGui.QFileDialog.getSaveFileName(
             self, 'Save as ...',
-            self.filename or self.last_dir or home_dir,
+            self.filename or os.path.join((self.last_dir or home_dir), getattr(self.data, 'name', '')),
             '{} (*{})'.format(format_name, ' *'.join(format_extensions)))
         if not filename:
             return

@@ -70,6 +70,17 @@ Example
    :members:
 
 
+
+.. index:: random forest
+   pair: regression; random forest
+
+Random Forest
+-------------
+.. autoclass:: RandomForestRegressionLearner
+   :members:
+
+
+
 .. index:: random forest (simple)
    pair: regression; simple random forest
 
@@ -77,4 +88,14 @@ Simple Random Forest
 --------------------
 
 .. autoclass:: SimpleRandomForestLearner
+   :members:
+
+
+
+.. index:: regression tree
+   pair: regression; tree
+
+Regression Tree
+-------------------
+.. autoclass:: TreeRegressionLearner
    :members:

@@ -13,7 +13,8 @@ from . import impute, discretize
 from Orange.statistics import distribution
 from ..misc.enum import Enum
 
-__all__ = ["Continuize", "Discretize", "Impute", "SklImpute", "Normalize", "Randomize"]
+__all__ = ["Continuize", "Discretize", "Impute", "SklImpute",
+           "Normalize", "Randomize", "RemoveNaNClasses"]
 
 
 class Preprocess:
@@ -152,12 +153,23 @@ class SklImpute(Preprocess):
         self.force = force
 
     def __call__(self, data):
+        from Orange.data.sql.table import SqlTable
+        if isinstance(data, SqlTable):
+            return Impute()(data)
+
         if not self.force and not np.isnan(data.X).any():
             return data
         self.imputer = skl_preprocessing.Imputer(strategy=self.strategy)
         X = self.imputer.fit_transform(data.X)
-        features = [impute.Average()(data, var, value) for var, value in
-                    zip(data.domain.attributes, self.imputer.statistics_)]
+        # Create new variables with appropriate `compute_value`, but
+        # drop the ones which do not have valid `imputer.statistics_`
+        # (i.e. all NaN columns). `sklearn.preprocessing.Imputer` already
+        # drops them from the transformed X.
+        features = [impute.Average()(data, var, value)
+                    for var, value in zip(data.domain.attributes,
+                                          self.imputer.statistics_)
+                    if not np.isnan(value)]
+        assert X.shape[1] == len(features)
         domain = Orange.data.Domain(features, data.domain.class_vars,
                                     data.domain.metas)
         return Orange.data.Table(domain, X, data.Y, data.metas)
@@ -185,6 +197,32 @@ class RemoveConstant(Preprocess):
         domain = Orange.data.Domain(atts, data.domain.class_vars,
                                     data.domain.metas)
         return Orange.data.Table(domain, data)
+
+
+class RemoveNaNClasses(Preprocess):
+    """
+    Construct preprocessor that removes examples with missing class
+    from the data set.
+    """
+
+    def __call__(self, data):
+        """
+        Remove rows that contain NaN in any class variable from the data set
+        and return the resulting data table.
+
+        Parameters
+        ----------
+        data : an input data set
+
+        Returns
+        -------
+        data : data set without rows with missing classes
+        """
+        if len(data.Y.shape) > 1:
+            nan_cls = np.any(np.isnan(data.Y), axis=1)
+        else:
+            nan_cls = np.isnan(data.Y)
+        return Table(data.domain, data, np.where(nan_cls == False))
 
 
 class Normalize(Preprocess):

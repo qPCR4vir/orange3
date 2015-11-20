@@ -1,12 +1,16 @@
 from itertools import chain
+
 from PyQt4 import QtGui, Qt, QtCore
-from Orange.widgets import widget, gui
-from Orange.widgets.settings import *
-from Orange.widgets.utils import vartype
-from Orange.data.table import Table
-from Orange.data import DiscreteVariable, ContinuousVariable, StringVariable
-from Orange.preprocess import Remove
+
+from Orange.data import (ContinuousVariable, DiscreteVariable, StringVariable,
+                         Table)
 import Orange.data.filter as data_filter
+from Orange.data.sql.table import SqlTable
+from Orange.preprocess import Remove
+from Orange.widgets import widget, gui
+from Orange.widgets.settings import \
+    PerfectDomainContextHandler, Setting, ContextSetting
+from Orange.widgets.utils import vartype
 
 
 class OWSelectRows(widget.OWWidget):
@@ -23,8 +27,7 @@ class OWSelectRows(widget.OWWidget):
 
     want_main_area = False
 
-    settingsHandler = DomainContextHandler(
-        match_values=DomainContextHandler.MATCH_VALUES_ALL)
+    settingsHandler = PerfectDomainContextHandler()
     conditions = ContextSetting([])
     update_on_change = Setting(True)
     purge_attributes = Setting(True)
@@ -90,13 +93,13 @@ class OWSelectRows(widget.OWWidget):
 
         box = gui.widgetBox(self.controlArea, orientation="horizontal")
         box_setting = gui.widgetBox(box, 'Purging')
-        gui.checkBox(box_setting, self, "purge_attributes",
-                     "Remove unused features",
-                     callback=self.conditions_changed)
+        self.cb_pa = gui.checkBox(
+            box_setting, self, "purge_attributes", "Remove unused features",
+            callback=self.conditions_changed)
         gui.separator(box_setting, height=1)
-        gui.checkBox(box_setting, self, "purge_classes",
-                     "Remove unused classes",
-                     callback=self.conditions_changed)
+        self.cb_pc = gui.checkBox(
+            box_setting, self, "purge_classes", "Remove unused classes",
+            callback=self.conditions_changed)
         gui.auto_commit(box, self, "auto_commit", label="Commit",
                         checkbox_label="Commit on change")
         self.set_data(None)
@@ -269,6 +272,8 @@ class OWSelectRows(widget.OWWidget):
     def set_data(self, data):
         self.closeContext()
         self.data = data
+        self.cb_pa.setEnabled(not isinstance(data, SqlTable))
+        self.cb_pc.setEnabled(not isinstance(data, SqlTable))
         self.remove_all_rows()
         self.add_button.setDisabled(data is None)
         self.add_all_button.setDisabled(
@@ -278,7 +283,11 @@ class OWSelectRows(widget.OWWidget):
             self.commit()
             return
         self.conditions = []
-        self.openContext(data)
+        try:
+            self.openContext(data)
+        except Exception:
+            pass
+
         if not self.conditions and len(data.domain.variables):
             self.add_row()
         self.update_info(data, self.data_in_variables)
@@ -354,7 +363,8 @@ class OWSelectRows(widget.OWWidget):
 
             purge_attrs = self.purge_attributes
             purge_classes = self.purge_classes
-            if purge_attrs or purge_classes:
+            if (purge_attrs or purge_classes) and \
+                    not isinstance(self.data, SqlTable):
                 attr_flags = sum([Remove.RemoveConstant * purge_attrs,
                                   Remove.RemoveUnusedValues * purge_attrs])
                 class_flags = sum([Remove.RemoveConstant * purge_classes,
