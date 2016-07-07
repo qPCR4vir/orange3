@@ -1,20 +1,23 @@
+# Test methods with long descriptive names can omit docstrings
+# pylint: disable=missing-docstring
+
 import inspect
-import os
 import pickle
 import pkgutil
 import unittest
 
-import numpy as np
 import traceback
+import numpy as np
 from Orange.base import SklLearner
 
 import Orange.classification
-from Orange.classification import (
-    Learner, Model, NaiveBayesLearner, LogisticRegressionLearner)
-from Orange.data import ContinuousVariable, DiscreteVariable, Domain, Table, Variable
-from Orange.data.io import BasketFormat
+from Orange.classification import (Learner, Model, NaiveBayesLearner,
+                                   LogisticRegressionLearner, NuSVMLearner)
+from Orange.data import (ContinuousVariable, DiscreteVariable,
+                         Domain, Table, Variable)
 from Orange.evaluation import CrossValidation
 from Orange.tests.dummy_learners import DummyLearner, DummyMulticlassLearner
+from Orange.tests import test_filename
 
 
 class MultiClassTest(unittest.TestCase):
@@ -24,14 +27,15 @@ class MultiClassTest(unittest.TestCase):
         x = np.random.random_integers(1, 3, (nrows, ncols))
 
         # multiple class variables
-        y = np.random.random_integers(10, 11, (nrows, 2))
+        y = np.random.random_integers(0, 1, (nrows, 2))
         t = Table(x, y)
         learn = DummyLearner()
-        with self.assertRaises(TypeError):
+        # TODO: Errors raised from various data checks should be made consistent
+        with self.assertRaises((ValueError, TypeError)):
             clf = learn(t)
 
         # single class variable
-        y = np.random.random_integers(10, 11, (nrows, 1))
+        y = np.random.random_integers(0, 1, (nrows, 1))
         t = Table(x, y)
         learn = DummyLearner()
         clf = learn(t)
@@ -42,7 +46,7 @@ class MultiClassTest(unittest.TestCase):
         nrows = 20
         ncols = 10
         x = np.random.random_integers(1, 3, (nrows, ncols))
-        y = np.random.random_integers(10, 11, (nrows, 2))
+        y = np.random.random_integers(0, 1, (nrows, 2))
         t = Table(x, y)
         learn = DummyMulticlassLearner()
         clf = learn(t)
@@ -76,10 +80,10 @@ class ModelTest(unittest.TestCase):
         clf = learn(t)
         clf.ret = Model.Probs
         y2 = clf(x, ret=Model.Value)
-        self.assertTrue(y2.shape == (nrows,))
+        self.assertEqual(y2.shape, (nrows,))
         y2, probs = clf(x, ret=Model.ValueProbs)
-        self.assertTrue(y2.shape == (nrows, ))
-        self.assertTrue(probs.shape == (nrows, 2))
+        self.assertEqual(y2.shape, (nrows,))
+        self.assertEqual(probs.shape, (nrows, 2))
 
         # multitarget
         y = np.random.random_integers(1, 5, (nrows, 2))
@@ -140,9 +144,10 @@ class ExpandProbabilitiesTest(unittest.TestCase):
     def prepareTable(self, rows, attr, vars, class_var_domain):
         attributes = ["Feature %i" % i for i in range(attr)]
         classes = ["Class %i" % i for i in range(vars)]
-        attr_vars = [DiscreteVariable(name=a) for a in attributes]
+        attr_vars = [DiscreteVariable(name=a, values=range(2))
+                     for a in attributes]
         class_vars = [DiscreteVariable(name=c,
-                                            values=range(class_var_domain))
+                                       values=range(class_var_domain))
                       for c in classes]
         meta_vars = []
         self.domain = Domain(attr_vars, class_vars, meta_vars)
@@ -183,7 +188,8 @@ class SklTest(unittest.TestCase):
         lr = LogisticRegressionLearner()
         assert isinstance(lr, Orange.classification.SklLearner)
         res = CrossValidation(table, [lr], k=2)
-        self.assertTrue(0.7 < Orange.evaluation.AUC(res)[0] < 0.9)
+        self.assertGreater(Orange.evaluation.AUC(res)[0], 0.7)
+        self.assertLess(Orange.evaluation.AUC(res)[0], 0.9)
 
     def test_nan_columns(self):
         data = Orange.data.Table("iris")
@@ -202,23 +208,50 @@ class ClassfierListInputTest(unittest.TestCase):
     def test_discrete(self):
         table = Table("titanic")
         tree = Orange.classification.TreeLearner()(table)
-        strlist = [ [ "crew", "adult", "male" ],
-                    [ "crew", "adult", None ] ]
+        strlist = [["crew", "adult", "male"],
+                   ["crew", "adult", None]]
         for se in strlist: #individual examples
             assert(all(tree(se) == tree(Orange.data.Table(table.domain, [se]))))
         assert(all(tree(strlist) == tree(Orange.data.Table(table.domain, strlist))))
 
-    def test_continuous(lf):
+    def test_continuous(self):
         table = Table("iris")
         tree = Orange.classification.TreeLearner()(table)
-        strlist = [ [ 2, 3, 4, 5 ],
-                    [ 1, 2, 3, 5 ] ]
+        strlist = [[2, 3, 4, 5],
+                   [1, 2, 3, 5]]
         for se in strlist: #individual examples
             assert(all(tree(se) == tree(Orange.data.Table(table.domain, [se]))))
         assert(all(tree(strlist) == tree(Orange.data.Table(table.domain, strlist))))
+
+
+class UnknownValuesInPrediction(unittest.TestCase):
+    def setUp(self):
+        Variable._clear_all_caches()
+
+    def test_unknown(self):
+        table = Table("iris")
+        tree = LogisticRegressionLearner()(table)
+        tree([1, 2, None])
+
+    def test_missing_class(self):
+        table = Table(test_filename("adult_sample_missing"))
+        for learner in LearnerAccessibility().all_learners():
+            try:
+                learner = learner()
+                if isinstance(learner, NuSVMLearner):
+                    learner.params["nu"] = 0.01
+                model = learner(table)
+                model(table)
+            except TypeError:
+                traceback.print_exc()
+                continue
 
 
 class LearnerAccessibility(unittest.TestCase):
+
+    def setUp(self):
+        Variable._clear_all_caches()
+
     def all_learners(self):
         classification_modules = pkgutil.walk_packages(
             path=Orange.classification.__path__,
@@ -266,6 +299,16 @@ class LearnerAccessibility(unittest.TestCase):
             try:
                 learner = learner()
                 table = Table("housing")
+                self.assertRaises(ValueError, learner, table)
+            except TypeError as err:
+                traceback.print_exc()
+                continue
+
+    def test_adequacy_all_learners_multiclass(self):
+        for learner in self.all_learners():
+            try:
+                learner = learner()
+                table = Table(test_filename("test8.tab"))
                 self.assertRaises(ValueError, learner, table)
             except TypeError as err:
                 traceback.print_exc()

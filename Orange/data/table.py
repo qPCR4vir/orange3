@@ -13,13 +13,13 @@ from urllib.parse import urlparse, unquote as urlunquote
 from urllib.request import urlopen
 from urllib.error import URLError
 
-import bottlechest as bn
+import bottleneck as bn
 from scipy import sparse as sp
 
+from Orange.statistics.util import bincount, countnans, contingency, stats as fast_stats
 from .instance import *
 from Orange.util import flatten
-from Orange.data import Domain, io, Variable, StringVariable
-from Orange.data.io import FileFormat
+from Orange.data import Domain, Variable, StringVariable
 from Orange.data.storage import Storage
 from . import _contingency
 from . import _valuecount
@@ -146,6 +146,7 @@ class Columns:
 # noinspection PyPep8Naming
 class Table(MutableSequence, Storage):
     __file__ = None
+    name = "untitled"
 
     @property
     def columns(self):
@@ -203,6 +204,10 @@ class Table(MutableSequence, Storage):
 
         return cls.from_numpy(domain, *args, **kwargs)
 
+    def __init__(self, *args, **kwargs):
+        # So subclasses can expect to call super without breakage; noop
+        pass
+
     @classmethod
     def from_domain(cls, domain, n_rows=0, weights=False):
         """
@@ -218,7 +223,7 @@ class Table(MutableSequence, Storage):
         :return: a new table
         :rtype: Orange.data.Table
         """
-        self = cls.__new__(Table)
+        self = cls()
         self.domain = domain
         self.n_rows = n_rows
         self.X = np.zeros((n_rows, len(domain.attributes)))
@@ -229,6 +234,7 @@ class Table(MutableSequence, Storage):
             self.W = np.empty((n_rows, 0))
         self.metas = np.empty((n_rows, len(self.domain.metas)), object)
         cls._init_ids(self)
+        self.attributes = {}
         return self
 
     conversion_cache = None
@@ -253,7 +259,13 @@ class Table(MutableSequence, Storage):
         :rtype: Orange.data.Table
         """
 
+        def sparse_to_flat(x):
+            if sp.issparse(x):
+                x = np.ravel(x.toarray())
+            return x
+
         def get_columns(row_indices, src_cols, n_rows, dtype=np.float64):
+
             if not len(src_cols):
                 return np.zeros((n_rows, 0), dtype=source.X.dtype)
 
@@ -284,21 +296,21 @@ class Table(MutableSequence, Storage):
                 elif col < 0:
                     a[:, i] = source.metas[row_indices, -1 - col]
                 elif col < n_src_attrs:
-                    a[:, i] = source.X[row_indices, col]
+                    a[:, i] = sparse_to_flat(source.X[row_indices, col])
                 else:
                     a[:, i] = source._Y[row_indices, col - n_src_attrs]
             return a
 
-        new_cache = Table.conversion_cache is None
+        new_cache = cls.conversion_cache is None
         try:
             if new_cache:
-                Table.conversion_cache = {}
+                cls.conversion_cache = {}
             else:
-                cached = Table.conversion_cache.get((id(domain), id(source)))
+                cached = cls.conversion_cache.get((id(domain), id(source)))
                 if cached:
                     return cached
             if domain == source.domain:
-                return Table.from_table_rows(source, row_indices)
+                return cls.from_table_rows(source, row_indices)
 
             if isinstance(row_indices, slice):
                 start, stop, stride = row_indices.indices(source.X.shape[0])
@@ -306,17 +318,17 @@ class Table(MutableSequence, Storage):
                 if n_rows < 0:
                     n_rows = 0
             elif row_indices is ...:
-                n_rows = len(source.X)
+                n_rows = len(source)
             else:
                 n_rows = len(row_indices)
 
-            self = cls.__new__(Table)
+            self = cls()
             self.domain = domain
             conversion = domain.get_conversion(source.domain)
             self.X = get_columns(row_indices, conversion.attributes, n_rows)
             if self.X.ndim == 1:
                 self.X = self.X.reshape(-1, len(self.domain.attributes))
-            self.Y = get_columns(row_indices, conversion.class_vars, n_rows)
+            self.Y = sparse_to_flat(get_columns(row_indices, conversion.class_vars, n_rows))
 
             dtype = np.float64
             if any(isinstance(var, StringVariable) for var in domain.metas):
@@ -334,11 +346,12 @@ class Table(MutableSequence, Storage):
                 self.ids = np.array(source.ids[row_indices])
             else:
                 cls._init_ids(self)
-            Table.conversion_cache[(id(domain), id(source))] = self
+            self.attributes = getattr(source, 'attributes', {})
+            cls.conversion_cache[(id(domain), id(source))] = self
             return self
         finally:
             if new_cache:
-                Table.conversion_cache = None
+                cls.conversion_cache = None
 
     @classmethod
     def from_table_rows(cls, source, row_indices):
@@ -352,7 +365,7 @@ class Table(MutableSequence, Storage):
         :return: a new table
         :rtype: Orange.data.Table
         """
-        self = cls.__new__(Table)
+        self = cls()
         self.domain = source.domain
         self.X = source.X[row_indices]
         if self.X.ndim == 1:
@@ -364,6 +377,7 @@ class Table(MutableSequence, Storage):
         self.W = source.W[row_indices]
         self.name = getattr(source, 'name', '')
         self.ids = np.array(source.ids[row_indices])
+        self.attributes = getattr(source, 'attributes', {})
         return self
 
     @classmethod
@@ -387,7 +401,7 @@ class Table(MutableSequence, Storage):
         :return:
         """
         X, Y, W = _check_arrays(X, Y, W, dtype='float64')
-        metas, = _check_arrays(metas)
+        metas, = _check_arrays(metas, dtype=object)
 
         if Y is not None and Y.ndim == 1:
             Y = Y.reshape(Y.shape[0], 1)
@@ -426,7 +440,7 @@ class Table(MutableSequence, Storage):
             raise ValueError(
                 "Parts of data contain different numbers of rows.")
 
-        self = Table.__new__(Table)
+        self = cls()
         self.domain = domain
         self.X = X
         self.Y = Y
@@ -434,6 +448,7 @@ class Table(MutableSequence, Storage):
         self.W = W
         self.n_rows = self.X.shape[0]
         cls._init_ids(self)
+        self.attributes = {}
         return self
 
     @classmethod
@@ -478,6 +493,7 @@ class Table(MutableSequence, Storage):
         :type filename: str
         """
         ext = os.path.splitext(filename)[1]
+        from Orange.data.io import FileFormat
         writer = FileFormat.writers.get(ext)
         if not writer:
             desc = FileFormat.names.get(ext)
@@ -486,10 +502,10 @@ class Table(MutableSequence, Storage):
                     format(desc.lower()))
             else:
                 raise IOError("Unknown file name extension.")
-        writer().write_file(filename, self)
+        writer.write_file(filename, self)
 
-    @staticmethod
-    def from_file(filename, wrapper=None):
+    @classmethod
+    def from_file(cls, filename):
         """
         Read a data table from a file. The path can be absolute or relative.
 
@@ -498,24 +514,17 @@ class Table(MutableSequence, Storage):
         :return: a new data table
         :rtype: Orange.data.Table
         """
-        for dir in dataset_dirs:
-            absolute_filename = os.path.join(dir, filename)
-            if os.path.exists(absolute_filename):
-                break
-            for ext in FileFormat.readers:
-                if filename.endswith(ext):
-                    break
-                if os.path.exists(absolute_filename + ext):
-                    absolute_filename += ext
-                    break
-            if os.path.exists(absolute_filename):
-                break
-        else:
-            absolute_filename = ext = ""
+        from Orange.data.io import FileFormat
 
-        if not os.path.exists(absolute_filename):
-            raise IOError('File "{}" was not found.'.format(filename))
-        data = FileFormat.read(absolute_filename, wrapper)
+        absolute_filename = FileFormat.locate(filename, dataset_dirs)
+        reader = FileFormat.get_reader(absolute_filename)
+        data = reader.read()
+
+        # Readers return plain table. Make sure to cast it to appropriate
+        # (subclass) type
+        if cls != data.__class__:
+            data = cls(data)
+
         data.name = os.path.splitext(os.path.split(filename)[-1])[0]
         # no need to call _init_ids as fuctions from .io already
         # construct a table with .ids
@@ -525,53 +534,11 @@ class Table(MutableSequence, Storage):
 
     @classmethod
     def from_url(cls, url):
-        # Resolve (potential) redirects to a final URL
-        response = urlopen(url, timeout=10)
-        url = response.url
-        response.close()
-
-        def url_googlesheets(url):
-            match = re.match(r'(?:https?://)?(?:www\.)?'
-                             'docs\.google\.com/spreadsheets/d/'
-                             '(?P<workbook_id>[-\w_]+)'
-                             '(?:/.*?gid=(?P<sheet_id>\d+).*|.*)?',
-                             url, re.IGNORECASE)
-            try:
-                workbook, sheet = match.group('workbook_id'), match.group('sheet_id')
-                if not workbook:
-                    raise ValueError
-            except (AttributeError, ValueError):
-                raise ValueError
-            url = 'https://docs.google.com/spreadsheets/d/{}/export?format=tsv'.format(workbook)
-            if sheet:
-                url += '&gid=' + sheet
-            return url
-
-        URL_TRIMMERS = (
-            url_googlesheets,
-        )
-        for trim in URL_TRIMMERS:
-            try: url = trim(url)
-            except ValueError: continue
-            else: break
-
-        name = urlparse(url)[2].replace('/', '_')
-
-        def suggested_filename(content_disposition):
-            # See https://tools.ietf.org/html/rfc6266#section-4.1
-            matches = re.findall(r"filename\*?=(?:\"|.{0,10}?'[^']*')([^\"]+)",
-                                 content_disposition or '')
-            return urlunquote(matches[-1]) if matches else ''
-
-        with urlopen(url, timeout=10) as response:
-            name = suggested_filename(response.headers['content-disposition']) or name
-            with NamedTemporaryFile(suffix=name) as f:
-                f.write(response.read())
-                f.flush()
-                data = cls.from_file(f.name)
-        # Override name set in from_file() to avoid holding the temp prefix
-        data.name = os.path.splitext(name)[0]
-        data.origin = url
+        from Orange.data.io import UrlReader
+        reader = UrlReader(url)
+        data = reader.read()
+        if cls != data.__class__:
+            data = cls(data)
         return data
 
     # Helper function for __setitem__ and insert:
@@ -652,7 +619,7 @@ class Table(MutableSequence, Storage):
         if isinstance(key, Integral):
             return RowInstance(self, key)
         if not isinstance(key, tuple):
-            return Table.from_table_rows(self, key)
+            return self.from_table_rows(self, key)
 
         if len(key) != 2:
             raise IndexError("Table indices must be one- or two-dimensional")
@@ -690,7 +657,7 @@ class Table(MutableSequence, Storage):
             domain = Domain(r_attrs, r_classes, r_metas)
         else:
             domain = self.domain
-        return Table.from_table(domain, self, row_idx)
+        return self.from_table(domain, self, row_idx)
 
     def __setitem__(self, key, value):
         if not self._check_all_dense():
@@ -831,6 +798,7 @@ class Table(MutableSequence, Storage):
             row += len(self)
         if row < 0 or row > len(self):
             raise IndexError("Index out of range")
+        self.ensure_copy()  # ensure that numpy arrays are single-segment for resize
         self._resize_all(len(self) + 1)
         if row < len(self):
             self.X[row + 1:] = self.X[row:-1]
@@ -959,7 +927,7 @@ class Table(MutableSequence, Storage):
         """
         Return a copy of the table
         """
-        t = Table(self)
+        t = self.__class__(self)
         t.ensure_copy()
         return t
 
@@ -968,28 +936,23 @@ class Table(MutableSequence, Storage):
         if data is None:
             return Storage.Missing
         if data is not None and sp.issparse(data):
-            try:
-                if bn.bincount(data.data, 1)[0][0] == 0:
-                    return Storage.SPARSE_BOOL
-            except ValueError as e:
-                pass
-            return Storage.SPARSE
+            return Storage.SPARSE_BOOL if (data.data == 1).all() else Storage.SPARSE
         else:
             return Storage.DENSE
 
     def X_density(self):
         if not hasattr(self, "_X_density"):
-            self._X_density = Table.__determine_density(self.X)
+            self._X_density = self.__determine_density(self.X)
         return self._X_density
 
     def Y_density(self):
         if not hasattr(self, "_Y_density"):
-            self._Y_density = Table.__determine_density(self._Y)
+            self._Y_density = self.__determine_density(self._Y)
         return self._Y_density
 
     def metas_density(self):
         if not hasattr(self, "_metas_density"):
-            self._metas_density = Table.__determine_density(self.metas)
+            self._metas_density = self.__determine_density(self.metas)
         return self._metas_density
 
     def set_weights(self, weight=1):
@@ -1015,7 +978,8 @@ class Table(MutableSequence, Storage):
 
     def has_missing(self):
         """Return `True` if there are any missing attribute or class values."""
-        return bn.anynan(self.X) or bn.anynan(self._Y)
+        missing_x = not sp.issparse(self.X) and bn.anynan(self.X)   # do not check for sparse X
+        return missing_x or bn.anynan(self._Y)
 
     def has_missing_class(self):
         """Return `True` if there are any missing class values."""
@@ -1092,7 +1056,7 @@ class Table(MutableSequence, Storage):
                 else:
                     remove = np.logical_or(remove, bn.anynan([col], axis=0))
         retain = remove if negate else np.logical_not(remove)
-        return Table.from_table_rows(self, retain)
+        return self.from_table_rows(self, retain)
 
     def _filter_has_class(self, negate=False):
         if sp.issparse(self._Y):
@@ -1106,7 +1070,7 @@ class Table(MutableSequence, Storage):
             retain = bn.anynan(self._Y, axis=1)
             if not negate:
                 retain = np.logical_not(retain)
-        return Table.from_table_rows(self, retain)
+        return self.from_table_rows(self, retain)
 
     def _filter_same_value(self, column, value, negate=False):
         if not isinstance(value, Real):
@@ -1114,9 +1078,9 @@ class Table(MutableSequence, Storage):
         sel = self.get_column_view(column)[0] == value
         if negate:
             sel = np.logical_not(sel)
-        return Table.from_table_rows(self, sel)
+        return self.from_table_rows(self, sel)
 
-    def _filter_values(self, filter):
+    def _filter_values_indicators(self, filter):
         from Orange.data import filter as data_filter
 
         if isinstance(filter, data_filter.Values):
@@ -1131,6 +1095,12 @@ class Table(MutableSequence, Storage):
             sel = np.zeros(len(self), dtype=bool)
 
         for f in conditions:
+            if isinstance(f, data_filter.Values):
+                if conjunction:
+                    sel *= self._filter_values_indicators(f)
+                else:
+                    sel += self._filter_values_indicators(f)
+                continue
             col = self.get_column_view(f.column)[0]
             if isinstance(f, data_filter.FilterDiscrete) and f.values is None \
                     or isinstance(f, data_filter.FilterContinuous) and \
@@ -1142,9 +1112,9 @@ class Table(MutableSequence, Storage):
             elif isinstance(f, data_filter.FilterString) and \
                             f.oper == f.IsDefined:
                 if conjunction:
-                    sel *= (col != "")
+                    sel *= col.astype(bool)
                 else:
-                    sel += (col != "")
+                    sel += col.astype(bool)
             elif isinstance(f, data_filter.FilterDiscrete):
                 if conjunction:
                     s2 = np.zeros(len(self), dtype=bool)
@@ -1222,7 +1192,11 @@ class Table(MutableSequence, Storage):
 
         if filter.negate:
             sel = ~sel
-        return Table.from_table_rows(self, sel)
+        return sel
+
+    def _filter_values(self, filter):
+        sel = self._filter_values_indicators(filter)
+        return self.from_table(self.domain, self, sel)
 
     def _compute_basic_stats(self, columns=None,
                              include_metas=False, compute_variance=False):
@@ -1234,19 +1208,19 @@ class Table(MutableSequence, Storage):
         stats = []
         if not columns:
             if self.domain.attributes:
-                rr.append(bn.stats(self.X, W))
+                rr.append(fast_stats(self.X, W))
             if self.domain.class_vars:
-                rr.append(bn.stats(self._Y, W))
+                rr.append(fast_stats(self._Y, W))
             if include_metas and self.domain.metas:
-                rr.append(bn.stats(self.metas, W))
+                rr.append(fast_stats(self.metas, W))
             if len(rr):
                 stats = np.vstack(tuple(rr))
         else:
             columns = [self.domain.index(c) for c in columns]
             nattrs = len(self.domain.attributes)
-            Xs = any(0 <= c < nattrs for c in columns) and bn.stats(self.X, W)
-            Ys = any(c >= nattrs for c in columns) and bn.stats(self._Y, W)
-            ms = any(c < 0 for c in columns) and bn.stats(self.metas, W)
+            Xs = any(0 <= c < nattrs for c in columns) and fast_stats(self.X, W)
+            Ys = any(c >= nattrs for c in columns) and fast_stats(self._Y, W)
+            ms = any(c < 0 for c in columns) and fast_stats(self.metas, W)
             for column in columns:
                 if 0 <= column < nattrs:
                     stats.append(Xs[column, :])
@@ -1263,8 +1237,7 @@ class Table(MutableSequence, Storage):
                 return M[:, col], self.W if self.has_weights() else None, None
             if cachedM is None:
                 if single_column:
-                    warn(ResourceWarning,
-                         "computing distributions on sparse data "
+                    warn("computing distributions on sparse data "
                          "for a single column is inefficient")
                 cachedM = sp.csc_matrix(self.X)
             data = cachedM.data[cachedM.indptr[col]:cachedM.indptr[col + 1]]
@@ -1285,26 +1258,28 @@ class Table(MutableSequence, Storage):
         Xcsc = Ycsc = None
         for col in columns:
             var = self.domain[col]
-            if col < self.X.shape[1]:
+            if 0 <= col < self.X.shape[1]:
                 m, W, Xcsc = _get_matrix(self.X, Xcsc, col)
+            elif col < 0:
+                m, W, Xcsc = _get_matrix(self.metas, Xcsc, col * (-1) - 1)
             else:
                 m, W, Ycsc = _get_matrix(self._Y, Ycsc, col - self.X.shape[1])
             if var.is_discrete:
                 if W is not None:
                     W = W.ravel()
-                dist, unknowns = bn.bincount(m, len(var.values) - 1, W)
+                dist, unknowns = bincount(m, len(var.values) - 1, W)
             elif not len(m):
                 dist, unknowns = np.zeros((2, 0)), 0
             else:
                 if W is not None:
                     ranks = np.argsort(m)
                     vals = np.vstack((m[ranks], W[ranks].flatten()))
-                    unknowns = bn.countnans(m, W)
+                    unknowns = countnans(m, W)
                 else:
                     vals = np.ones((2, m.shape[0]))
                     vals[0, :] = m
                     vals[0, :].sort()
-                    unknowns = bn.countnans(m)
+                    unknowns = countnans(m.astype(float))
                 dist = np.array(_valuecount.valuecount(vals))
             distributions.append((dist, unknowns))
 
@@ -1350,7 +1325,7 @@ class Table(MutableSequence, Storage):
         if row_data.dtype.kind != "f": #meta attributes can be stored as type object
             row_data = row_data.astype(float)
 
-        unknown_rows = bn.countnans(row_data)
+        unknown_rows = countnans(row_data)
         if unknown_rows:
             nan_inds = np.isnan(row_data)
             row_data = row_data[~nan_inds]
@@ -1376,14 +1351,15 @@ class Table(MutableSequence, Storage):
                     max_vals = max(len(v[2].values) for v in disc_vars)
                     disc_indi = {i for _, i, _ in disc_vars}
                     mask = [i in disc_indi for i in range(arr.shape[1])]
-                    conts, nans = bn.contingency(arr, row_data, max_vals - 1,
-                                                 n_rows - 1, W, mask)
+                    conts, nans = contingency(arr, row_data, max_vals - 1,
+                                              n_rows - 1, W, mask)
                     for col_i, arr_i, _ in disc_vars:
                         contingencies[col_i] = (conts[arr_i], nans[arr_i])
                 else:
                     for col_i, arr_i, var in disc_vars:
-                        contingencies[col_i] = bn.contingency(arr[:, arr_i],
-                                                              row_data, len(var.values) - 1, n_rows - 1, W)
+                        contingencies[col_i] = contingency(
+                            arr[:, arr_i].astype(float),
+                            row_data, len(var.values) - 1, n_rows - 1, W)
 
             cont_vars = [v for v in vars if v[2].is_continuous]
             if cont_vars:
@@ -1482,6 +1458,7 @@ def _rxc_ix(rows, cols):
 
     Examples
     --------
+    >>> import numpy as np
     >>> a = np.arange(10).reshape(2, 5)
     >>> a[_rxc_ix([0, 1], [3, 4])]
     array([[3, 4],

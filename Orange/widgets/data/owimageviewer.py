@@ -3,6 +3,7 @@ Image Viewer Widget
 -------------------
 
 """
+import sys
 import os
 import weakref
 import logging
@@ -31,9 +32,7 @@ from PyQt4.QtNetwork import (
 import Orange.data
 from Orange.widgets import widget, gui, settings
 from Orange.widgets.utils.itemmodels import VariableListModel
-from Orange.widgets.io import FileFormat
 
-# from OWConcurrent import Future, FutureWatcher
 from concurrent.futures import Future
 
 _log = logging.getLogger(__name__)
@@ -45,40 +44,41 @@ class GraphicsPixmapWidget(QGraphicsWidget):
         self.setCacheMode(QGraphicsItem.ItemCoordinateCache)
         self._pixmap = pixmap
         self._pixmapSize = QSizeF()
+        self._keepAspect = True
         self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
 
     def setPixmap(self, pixmap):
         if self._pixmap != pixmap:
             self._pixmap = QPixmap(pixmap)
             self.updateGeometry()
+            self.update()
 
     def pixmap(self):
         return QPixmap(self._pixmap)
 
-    def setPixmapSize(self, size):
-        if self._pixmapSize != size:
-            self._pixmapSize = QSizeF(size)
-            self.updateGeometry()
-
-    def pixmapSize(self):
-        if self._pixmapSize.isValid():
-            return QSizeF(self._pixmapSize)
-        else:
-            return QSizeF(self._pixmap.size())
-
     def sizeHint(self, which, constraint=QSizeF()):
         if which == Qt.PreferredSize:
-            return self.pixmapSize()
+            return QSizeF(self._pixmap.size())
         else:
             return QGraphicsWidget.sizeHint(self, which, constraint)
+
+    def setKeepAspectRatio(self, keep):
+        if self._keepAspect != keep:
+            self._keepAspect = bool(keep)
+            self.update()
+
+    def keepAspectRatio(self):
+        return self._keepAspect
 
     def paint(self, painter, option, widget=0):
         if self._pixmap.isNull():
             return
 
         rect = self.contentsRect()
-
-        pixsize = self.pixmapSize()
+        pixsize = QSizeF(self._pixmap.size())
+        aspectmode = (Qt.KeepAspectRatio if self._keepAspect
+                      else Qt.IgnoreAspectRatio)
+        pixsize.scale(rect.size(), aspectmode)
         pixrect = QRectF(QPointF(0, 0), pixsize)
         pixrect.moveCenter(rect.center())
 
@@ -134,13 +134,13 @@ class GraphicsThumbnailWidget(QGraphicsWidget):
 
         layout.addItem(self.pixmapWidget)
         layout.addItem(self.labelWidget)
-
+        layout.addStretch()
         layout.setAlignment(self.pixmapWidget, Qt.AlignCenter)
         layout.setAlignment(self.labelWidget, Qt.AlignHCenter | Qt.AlignBottom)
+
         self.setLayout(layout)
 
-        self.setSizePolicy(QSizePolicy.MinimumExpanding,
-                           QSizePolicy.MinimumExpanding)
+        self.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Minimum)
 
         self.setFlag(QGraphicsItem.ItemIsSelectable, True)
         self.setTitle(title)
@@ -180,18 +180,14 @@ class GraphicsThumbnailWidget(QGraphicsWidget):
             painter.save()
             painter.setPen(QPen(QColor(125, 162, 206, 192)))
             painter.setBrush(QBrush(QColor(217, 232, 252, 192)))
-            painter.drawRoundedRect(QRectF(contents.topLeft(),
-                self.geometry().size()), 3, 3)
+            painter.drawRoundedRect(
+                QRectF(contents.topLeft(), self.geometry().size()), 3, 3)
             painter.restore()
 
     def _updatePixmapSize(self):
-        pixmap = self.pixmap()
-        if not pixmap.isNull() and self._size.isValid():
-            pixsize = QSizeF(self.pixmap().size())
-            pixsize.scale(self._size, Qt.KeepAspectRatio)
-        else:
-            pixsize = QSizeF()
-        self.pixmapWidget.setPixmapSize(pixsize)
+        pixsize = QSizeF(self._size)
+        self.pixmapWidget.setMinimumSize(pixsize)
+        self.pixmapWidget.setMaximumSize(pixsize)
 
 
 class ThumbnailWidget(QGraphicsWidget):
@@ -207,6 +203,16 @@ class ThumbnailWidget(QGraphicsWidget):
     def setGeometry(self, geom):
         super(ThumbnailWidget, self).setGeometry(geom)
         self.reflow(self.size().width())
+
+    def event(self, event):
+        if event.type() == QEvent.LayoutRequest:
+            sh = self.effectiveSizeHint(Qt.PreferredSize)
+            self.resize(sh)
+            self.layout().activate()
+            event.accept()
+            return True
+        else:
+            return super().event(event)
 
     def reflow(self, width):
         if not self.layout():
@@ -232,6 +238,8 @@ class ThumbnailWidget(QGraphicsWidget):
 
         for i, item in enumerate(items):
             layout.addItem(item, i // ncol, i % ncol)
+
+        layout.invalidate()
 
     def items(self):
         layout = self.layout()
@@ -311,9 +319,9 @@ class GraphicsScene(QGraphicsScene):
 
 _ImageItem = namedtuple(
     "_ImageItem",
-    ["index",  # Row index in the input data table
-     "widget",  # GraphicsThumbnailWidget belonging to this item.
-     "url",  # Composed final url.
+    ["index",   # Row index in the input data table
+     "widget",  # GraphicsThumbnailWidget displaying the image.
+     "url",     # Composed final image url.
      "future"]  # Future instance yielding an QImage
 )
 
@@ -332,17 +340,31 @@ class OWImageViewer(widget.OWWidget):
     imageAttr = settings.ContextSetting(0)
     titleAttr = settings.ContextSetting(0)
 
-    zoom = settings.Setting(25)
+    imageSize = settings.Setting(100)
     autoCommit = settings.Setting(False)
 
-    want_graph = True
+    buttons_area_orientation = Qt.Vertical
+    graph_name = "scene"
 
     def __init__(self):
         super().__init__()
+        self.data = None
+        self.allAttrs = []
+        self.stringAttrs = []
+
+        self.thumbnailWidget = None
+        self.sceneLayout = None
+        self.selectedIndices = []
+
+        #: List of _ImageItems
+        self.items = []
+
+        self._errcount = 0
+        self._successcount = 0
 
         self.info = gui.widgetLabel(
-            gui.widgetBox(self.controlArea, "Info"),
-            "Waiting for input\n"
+            gui.vBox(self.controlArea, "Info"),
+            "Waiting for input.\n"
         )
 
         self.imageAttrCB = gui.comboBox(
@@ -364,17 +386,14 @@ class OWImageViewer(widget.OWWidget):
         )
 
         gui.hSlider(
-            self.controlArea, self, "zoom",
-            box="Zoom", minValue=1, maxValue=100, step=1,
-            callback=self.updateZoom,
+            self.controlArea, self, "imageSize",
+            box="Image Size", minValue=32, maxValue=1024, step=16,
+            callback=self.updateSize,
             createLabel=False
         )
-
-        gui.separator(self.controlArea)
-        gui.auto_commit(self.controlArea, self, "autoCommit",
-                        "Commit", "Auto commit")
-
         gui.rubber(self.controlArea)
+
+        gui.auto_commit(self.buttonsArea, self, "autoCommit", "Send", box=False)
 
         self.scene = GraphicsScene()
         self.sceneView = QGraphicsView(self.scene, self)
@@ -390,18 +409,7 @@ class OWImageViewer(widget.OWWidget):
         self.scene.selectionRectPointChanged.connect(
             self.onSelectionRectPointChanged, Qt.QueuedConnection
         )
-        self.graphButton.clicked.connect(self.saveScene)
         self.resize(800, 600)
-
-        self.thumbnailWidget = None
-        self.sceneLayout = None
-        self.selectedIndices = []
-
-        #: List of _ImageItems
-        self.items = []
-
-        self._errcount = 0
-        self._successcount = 0
 
         self.loader = ImageLoader(self)
 
@@ -437,7 +445,7 @@ class OWImageViewer(widget.OWWidget):
             if self.stringAttrs:
                 self.setupScene()
         else:
-            self.info.setText("Waiting for input\n")
+            self.info.setText("Waiting for input.\n")
 
     def clear(self):
         self.data = None
@@ -457,7 +465,7 @@ class OWImageViewer(widget.OWWidget):
                          if numpy.isfinite(inst[attr])]
             widget = ThumbnailWidget()
             layout = widget.layout()
-
+            size = QSizeF(self.imageSize, self.imageSize)
             self.scene.addItem(widget)
 
             for i, inst in enumerate(instances):
@@ -467,19 +475,21 @@ class OWImageViewer(widget.OWWidget):
                 thumbnail = GraphicsThumbnailWidget(
                     QPixmap(), title=title, parent=widget
                 )
-
+                thumbnail.setThumbnailSize(size)
                 thumbnail.setToolTip(url.toString())
                 thumbnail.instance = inst
                 layout.addItem(thumbnail, i / 5, i % 5)
 
                 if url.isValid():
                     future = self.loader.get(url)
-                    watcher = _FutureWatcher(parent=thumbnail)
-                    # watcher = FutureWatcher(future, parent=thumbnail)
 
-                    def set_pixmap(thumb=thumbnail, future=future):
+                    @future.add_done_callback
+                    def set_pixmap(future, thumb=thumbnail):
                         if future.cancelled():
                             return
+
+                        assert future.done()
+
                         if future.exception():
                             # Should be some generic error image.
                             pixmap = QPixmap()
@@ -489,13 +499,9 @@ class OWImageViewer(widget.OWWidget):
                             pixmap = QPixmap.fromImage(future.result())
 
                         thumb.setPixmap(pixmap)
-                        if not pixmap.isNull():
-                            thumb.setThumbnailSize(self.pixmapSize(pixmap))
 
                         self._updateStatus(future)
 
-                    watcher.finished.connect(set_pixmap, Qt.QueuedConnection)
-                    watcher.setFuture(future)
                 else:
                     future = None
                 self.items.append(_ImageItem(i, thumbnail, url, future))
@@ -508,11 +514,7 @@ class OWImageViewer(widget.OWWidget):
             self.sceneLayout = layout
 
         if self.sceneLayout:
-            width = (self.sceneView.width() -
-                     self.sceneView.verticalScrollBar().width())
-            self.thumbnailWidget.reflow(width)
-            self.thumbnailWidget.setPreferredWidth(width)
-            self.sceneLayout.activate()
+            self._updateGeometryConstraints()
 
     def urlFromValue(self, value):
         variable = value.variable
@@ -535,44 +537,34 @@ class OWImageViewer(widget.OWWidget):
             url.setScheme("file")
         return url
 
-    def pixmapSize(self, pixmap):
-        """
-        Return the preferred pixmap size based on the current `zoom` value.
-        """
-        scale = 2 * self.zoom / 100.0
-        size = QSizeF(pixmap.size()) * scale
-        return size.expandedTo(QSizeF(16, 16))
+    def _cancelAllFutures(self):
+        for item in self.items:
+            if item.future is not None:
+                item.future.cancel()
+                if item.future._reply is not None:
+                    item.future._reply.close()
+                    item.future._reply.deleteLater()
+                    item.future._reply = None
 
     def clearScene(self):
-        for item in self.items:
-            if item.future:
-                item.future._reply.close()
-                item.future.cancel()
+        self._cancelAllFutures()
 
         self.items = []
-        self._errcount = 0
-        self._successcount = 0
-
-        self.scene.clear()
         self.thumbnailWidget = None
         self.sceneLayout = None
+        self.scene.clear()
+        self._errcount = 0
+        self._successcount = 0
 
     def thumbnailItems(self):
         return [item.widget for item in self.items]
 
-    def updateZoom(self):
+    def updateSize(self):
+        size = QSizeF(self.imageSize, self.imageSize)
         for item in self.thumbnailItems():
-            item.setThumbnailSize(self.pixmapSize(item.pixmap()))
+            item.setThumbnailSize(size)
 
-        if self.thumbnailWidget:
-            width = (self.sceneView.width() -
-                     self.sceneView.verticalScrollBar().width())
-
-            self.thumbnailWidget.reflow(width)
-            self.thumbnailWidget.setPreferredWidth(width)
-
-        if self.sceneLayout:
-            self.sceneLayout.activate()
+        self._updateGeometryConstraints()
 
     def updateTitles(self):
         titleAttr = self.allAttrs[self.titleAttr]
@@ -596,13 +588,6 @@ class OWImageViewer(widget.OWWidget):
             self.send("Data", selected)
         else:
             self.send("Data", None)
-
-    def saveScene(self):
-        from Orange.widgets.data.owsave import OWSave
-
-        save_img = OWSave(data=self.scene,
-                          file_formats=FileFormat.img_writers)
-        save_img.exec_()
 
     def _updateStatus(self, future):
         if future.cancelled():
@@ -639,31 +624,37 @@ class OWImageViewer(widget.OWWidget):
     def _updateSceneRect(self):
         self.scene.setSceneRect(self.scene.itemsBoundingRect())
 
+    def _updateGeometryConstraints(self):
+        # Update the thumbnail grid widget's width constraint (derived from
+        # the viewport's width
+        if self.thumbnailWidget is not None:
+            width = (self.sceneView.width() -
+                     self.sceneView.verticalScrollBar().width())
+            width = width - 2
+            self.thumbnailWidget.reflow(width)
+            self.thumbnailWidget.setPreferredWidth(width)
+            self.thumbnailWidget.layout().activate()
+
     def onDeleteWidget(self):
-        for item in self.items:
-            item.future._reply.abort()
-            item.future.cancel()
+        self._cancelAllFutures()
+        self.clear()
 
     def eventFilter(self, receiver, event):
         if receiver is self.sceneView and event.type() == QEvent.Resize \
                 and self.thumbnailWidget:
-            width = (self.sceneView.width() -
-                     self.sceneView.verticalScrollBar().width())
-
-            self.thumbnailWidget.reflow(width)
-            self.thumbnailWidget.setPreferredWidth(width)
+            self._updateGeometryConstraints()
 
         return super(OWImageViewer, self).eventFilter(receiver, event)
 
 
 class ImageLoader(QObject):
     #: A weakref to a QNetworkAccessManager used for image retrieval.
-    #: (we can only have only one QNetworkDiskCache opened on the same
+    #: (we can only have one QNetworkDiskCache opened on the same
     #: directory)
     _NETMANAGER_REF = None
 
     def __init__(self, parent=None):
-        QObject.__init__(self, parent=None)
+        QObject.__init__(self, parent)
         assert QThread.currentThread() is QApplication.instance().thread()
 
         netmanager = self._NETMANAGER_REF and self._NETMANAGER_REF()
@@ -680,9 +671,9 @@ class ImageLoader(QObject):
 
     def get(self, url):
         future = Future()
-        url = url = QUrl(url)
+        url = QUrl(url)
         request = QNetworkRequest(url)
-        request.setRawHeader("User-Agent", "OWImageViewer/1.0")
+        request.setRawHeader(b"User-Agent", b"OWImageViewer/1.0")
         request.setAttribute(
             QNetworkRequest.CacheLoadControlAttribute,
             QNetworkRequest.PreferCache
@@ -691,12 +682,24 @@ class ImageLoader(QObject):
         # Future yielding a QNetworkReply when finished.
         reply = self._netmanager.get(request)
         future._reply = reply
+
+        @future.add_done_callback
+        def abort_on_cancel(f):
+            # abort the network request on future.cancel()
+            if f.cancelled() and f._reply is not None:
+                f._reply.abort()
+
         n_redir = 0
 
         def on_reply_ready(reply, future):
             nonlocal n_redir
+            # schedule deferred delete to ensure the reply is closed
+            # otherwise we will leak file/socket descriptors
+            reply.deleteLater()
+            future._reply = None
             if reply.error() == QNetworkReply.OperationCanceledError:
-                # The network request itself was canceled
+                # The network request was cancelled
+                reply.close()
                 future.cancel()
                 return
 
@@ -704,6 +707,7 @@ class ImageLoader(QObject):
                 # XXX Maybe convert the error into standard
                 # http and urllib exceptions.
                 future.set_exception(Exception(reply.errorString()))
+                reply.close()
                 return
 
             # Handle a possible redirection
@@ -720,10 +724,12 @@ class ImageLoader(QObject):
                 future._reply = newreply
                 newreply.finished.connect(
                     partial(on_reply_ready, newreply, future))
+                reply.close()
                 return
 
             reader = QImageReader(reply)
             image = reader.read()
+            reply.close()
 
             if image.isNull():
                 future.set_exception(Exception(reader.errorString()))
@@ -734,38 +740,24 @@ class ImageLoader(QObject):
         return future
 
 
-class _FutureWatcher(QObject):
-    finished = Signal()
-    cancelled = Signal()
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.future = None
-
-    def setFuture(self, future):
-        self.future = future
-        future.add_done_callback(self._future_done)
-
-    def _future_done(self, f):
-        if f.cancelled():
-            self.cancelled.emit()
-        elif f.done():
-            self.finished.emit()
-        else:
-            assert False
-
-
-def main():
+def main(argv=sys.argv):
     import sip
 
-    app = QApplication([])
+    app = QApplication(argv)
+    argv = app.arguments()
     w = OWImageViewer()
     w.show()
     w.raise_()
-    data = Orange.data.Table('zoo-with-images')
+
+    if len(argv) > 1:
+        data = Orange.data.Table(argv[1])
+    else:
+        data = Orange.data.Table('zoo-with-images')
+
     w.setData(data)
     rval = app.exec_()
     w.saveSettings()
+    w.onDeleteWidget()
     sip.delete(w)
     app.processEvents()
     return rval

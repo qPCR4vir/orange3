@@ -1,3 +1,6 @@
+# Test methods with long descriptive names can omit docstrings
+# pylint: disable=missing-docstring
+
 import unittest
 
 import numpy as np
@@ -6,19 +9,23 @@ from Orange.data import Table
 from Orange.classification import MajorityLearner
 
 
-class MajorityTest(unittest.TestCase):
+class TestMajorityLearner(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.iris = Table('iris')
+        cls.learn = MajorityLearner()
+
     def test_majority(self):
         nrows = 1000
         ncols = 10
         x = np.random.random_integers(1, 3, (nrows, ncols))
         y = np.random.random_integers(1, 3, (nrows, 1)) // 2
         t = Table(x, y)
-        learn = MajorityLearner()
-        clf = learn(t)
+        clf = self.learn(t)
 
         x2 = np.random.random_integers(1, 3, (nrows, ncols))
         y2 = clf(x2)
-        self.assertTrue((y2 == 1).all())
+        self.assertEqual(y2.all(), 1)
 
     def test_weights(self):
         nrows = 100
@@ -28,35 +35,30 @@ class MajorityTest(unittest.TestCase):
         heavy_class = 1
         w = (y == heavy_class) * 2 + 1
         t = Table(x, y, W=w)
-        learn = MajorityLearner()
-        clf = learn(t)
+        clf = self.learn(t)
 
         y2 = clf(x)
-        self.assertTrue((y2 == heavy_class).all())
+        self.assertEqual(y2.all(), heavy_class)
 
     def test_empty(self):
-        iris = Table('iris')
-        learn = MajorityLearner()
-        clf = learn(iris[:0])
-        y = clf(iris[0], clf.Probs)
+        clf = self.learn(self.iris[:0])
+        y = clf(self.iris[0], clf.Probs)
         self.assertTrue(np.allclose(y, y.sum() / y.size))
 
     def test_missing(self):
         iris = Table('iris')
         learn = MajorityLearner()
-        for e in iris[: len(iris) // 2 : 2]:
+        for e in iris[: len(iris) // 2: 2]:
             e.set_class("?")
         clf = learn(iris)
         y = clf(iris)
         self.assertTrue((y == 2).all())
 
-        iris = Table('iris')
-        learn = MajorityLearner()
         for e in iris:
             e.set_class("?")
         clf = learn(iris)
         y = clf(iris)
-        self.assertTrue((y == 1).all())
+        self.assertEqual(y.all(), 1)
 
     def test_continuous(self):
         autompg = Table('auto-mpg')
@@ -64,7 +66,7 @@ class MajorityTest(unittest.TestCase):
         self.assertRaises(ValueError, learn, autompg)
 
     def test_returns_random_class(self):
-        iris = Table('iris')
+        iris = self.iris
         train = np.ones((150,), dtype='bool')
         train[0] = False
         majority = MajorityLearner()(iris[train])

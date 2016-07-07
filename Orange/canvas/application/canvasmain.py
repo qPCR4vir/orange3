@@ -7,7 +7,7 @@ import sys
 import logging
 import operator
 from functools import partial
-from io import BytesIO
+from io import BytesIO, StringIO
 
 import pkg_resources
 
@@ -66,7 +66,7 @@ BASE_LINK = "http://orange.biolab.si/"
 LINKS = \
     {"start-using": BASE_LINK + "start-using/",
      "tutorial": BASE_LINK + "tutorial/",
-     "reference": BASE_LINK + "doc/"
+     "reference": BASE_LINK + "docs/"
      }
 
 
@@ -135,6 +135,18 @@ class DockableWindow(QDockWidget):
             self.__windowFlags = flags
             if self.isFloating():
                 self.__fixWindowFlags()
+
+    def paintEvent(self, event):
+        # HACK: Preventing calls to QDockWidget.paintEvent() seems to fix the
+        #
+        #     QPainter::begin: Paint device returned engine == 0, type: 3
+        #     QPainter...
+        #
+        # wall-of-text error that filled the buffers of our consoles.
+        #
+        # Without understanding reasons or implications, but with
+        # no immediate apparent negative side effects:
+        pass
 
     def floatingWindowFlags(self):
         """
@@ -400,6 +412,12 @@ class CanvasMainWindow(QMainWindow):
                     triggered=self.open_and_freeze_scheme
                     )
 
+        self.open_report_action = \
+            QAction(self.tr("Open Report"), self,
+                    objectName="action-open-report",
+                    triggered=self.open_report,
+                    )
+
         self.save_action = \
             QAction(self.tr("Save"), self,
                     objectName="action-save",
@@ -409,7 +427,7 @@ class CanvasMainWindow(QMainWindow):
                     )
 
         self.save_as_action = \
-            QAction(self.tr("Save As ..."), self,
+            QAction(self.tr("Save As..."), self,
                     objectName="action-save-as",
                     toolTip=self.tr("Save current workflow as."),
                     triggered=self.save_scheme_as,
@@ -528,7 +546,8 @@ class CanvasMainWindow(QMainWindow):
 
         self.show_report_action = \
             QAction(self.tr("Show Report View"), self,
-                    triggered=self.show_report_view
+                    triggered=self.show_report_view,
+                    shortcut=QKeySequence(Qt.ShiftModifier | Qt.Key_R)
                     )
 
         if sys.platform == "darwin":
@@ -577,7 +596,7 @@ class CanvasMainWindow(QMainWindow):
             self.set_scheme_margins_enabled)
 
         self.reset_widget_settings_action = \
-            QAction(self.tr("Reset widget settings..."), self,
+            QAction(self.tr("Reset Widget Settings..."), self,
                     triggered=self.reset_widget_settings)
 
     def setup_menu(self):
@@ -593,6 +612,7 @@ class CanvasMainWindow(QMainWindow):
         # File -> Open Recent submenu
         self.recent_menu = QMenu(self.tr("Open Recent"), file_menu)
         file_menu.addMenu(self.recent_menu)
+        file_menu.addAction(self.open_report_action)
         file_menu.addSeparator()
         file_menu.addAction(self.save_action)
         file_menu.addAction(self.save_as_action)
@@ -836,16 +856,24 @@ class CanvasMainWindow(QMainWindow):
     #################
     # Action handlers
     #################
+    def pre_close_save(self):
+        """
+        Ask whether to save the schema (if changed) and the report (if
+        not empty).
+
+        Returns: `False` if the user cancelled, `True` otherwise
+        """
+        return (not self.current_document().isModifiedStrict() or
+                self.ask_save_changes() != QDialog.Rejected
+            ) and self.ask_clear_report() != QDialog.Rejected
+
     def new_scheme(self):
         """New scheme. Return QDialog.Rejected if the user canceled
         the operation and QDialog.Accepted otherwise.
 
         """
-        document = self.current_document()
-        if document.isModifiedStrict():
-            # Ask for save changes
-            if self.ask_save_changes() == QDialog.Rejected:
-                return QDialog.Rejected
+        if not self.pre_close_save():
+            return QDialog.Rejected
 
         new_scheme = widgetsscheme.WidgetsScheme(parent=self)
 
@@ -870,15 +898,13 @@ class CanvasMainWindow(QMainWindow):
         the operation and QDialog.Accepted otherwise.
 
         """
-        document = self.current_document()
-        if document.isModifiedStrict():
-            if self.ask_save_changes() == QDialog.Rejected:
-                return QDialog.Rejected
+        if not self.pre_close_save():
+            return QDialog.Rejected
 
         if self.last_scheme_dir is None:
             # Get user 'Documents' folder
             start_dir = QDesktopServices.storageLocation(
-                            QDesktopServices.DocumentsLocation)
+                QDesktopServices.DocumentsLocation)
         else:
             start_dir = self.last_scheme_dir
 
@@ -895,6 +921,11 @@ class CanvasMainWindow(QMainWindow):
             return QDialog.Accepted
         else:
             return QDialog.Rejected
+
+    def open_report(self):
+        from Orange.canvas.report.owreport import OWReport
+        rep = OWReport()
+        rep.open_report()
 
     def open_and_freeze_scheme(self):
         """
@@ -920,12 +951,8 @@ class CanvasMainWindow(QMainWindow):
         """
         if isinstance(filename, QUrl):
             filename = filename.toLocalFile()
-
-        document = self.current_document()
-        if document.isModifiedStrict():
-            if self.ask_save_changes() == QDialog.Rejected:
-                return QDialog.Rejected
-
+        if not self.pre_close_save():
+            return QDialog.Rejected
         self.load_scheme(filename)
         return QDialog.Accepted
 
@@ -947,6 +974,18 @@ class CanvasMainWindow(QMainWindow):
             scheme_doc_widget.setPath(filename)
 
             self.add_recent_scheme(new_scheme.title, filename)
+
+    def load_scheme_xml(self, xml):
+        new_scheme = widgetsscheme.WidgetsScheme(parent=self)
+        scheme_load(new_scheme, StringIO(xml))
+        self.set_new_scheme(new_scheme)
+        return QDialog.Accepted
+
+    def get_scheme_xml(self):
+        buffer = BytesIO()
+        curr_scheme = self.current_document().scheme()
+        curr_scheme.save_to(buffer, pretty=True, pickle_fallback=True)
+        return buffer.getvalue().decode("utf-8")
 
     def new_scheme_from(self, filename):
         """Create and return a new :class:`widgetsscheme.WidgetsScheme`
@@ -987,11 +1026,8 @@ class CanvasMainWindow(QMainWindow):
         user canceled the operation and QDialog.Accepted otherwise.
 
         """
-        document = self.current_document()
-        if document.isModifiedStrict():
-            if self.ask_save_changes() == QDialog.Rejected:
-                return QDialog.Rejected
-
+        if not self.pre_close_save():
+            return QDialog.Rejected
         # TODO: Search for a temp backup scheme with per process
         # locking.
         if self.recent_schemes:
@@ -1019,6 +1055,59 @@ class CanvasMainWindow(QMainWindow):
         QApplication.sendEvent(old_scheme, QEvent(QEvent.Close))
 
         old_scheme.deleteLater()
+
+    def ask_clear_report(self):
+        """
+        Ask whether to keep, clear or save and clear the report.
+
+        Returns:
+            `QDialog.Rejected` if user cancels, `QDialog.Accepted` otherwise
+        """
+        from Orange.canvas.report.owreport import OWReport
+        report = OWReport.get_instance()
+        if report.is_empty():
+            return QDialog.Accepted
+
+        msgbox = QMessageBox(QMessageBox.Question,
+                             "Report", "Report window has unsaved changes.",
+                             parent=self,
+                             informativeText="Save the report?")
+        # Cancel must have AcceptRole, otherwise Os X reorders the buttons
+        save = msgbox.addButton("Save && Clear", QMessageBox.AcceptRole)
+        msgbox.addButton("Clear", QMessageBox.DestructiveRole)
+        keep = msgbox.addButton("Keep", QMessageBox.AcceptRole)
+        cancel = msgbox.addButton("Cancel", QMessageBox.RejectRole)
+        msgbox.exec()
+        button = msgbox.clickedButton()
+        if button is cancel or \
+                button is save and report.save_report() == QDialog.Rejected:
+            return QDialog.Rejected
+        if button is not keep:
+            report.clear()
+        return QDialog.Accepted
+
+    def ask_save_report(self):
+        """
+        Ask whether to save the report or not.
+
+        Returns:
+            `QDialog.Rejected` if user cancels, `QDialog.Accepted` otherwise
+        """
+        from Orange.canvas.report.owreport import OWReport
+        report = OWReport.get_instance()
+        if not report.is_changed():
+            return QDialog.Accepted
+
+        answ = message_question(
+            "Report window contains unsaved changes", "Report window",
+            "Save the report?",
+            buttons=QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
+            parent=self)
+        if answ == QMessageBox.Cancel:
+            return QDialog.Rejected
+        if answ == QMessageBox.Yes:
+            return report.save_report()
+        return QDialog.Accepted
 
     def ask_save_changes(self):
         """Ask the user to save the changes to the current scheme.
@@ -1235,7 +1324,7 @@ class CanvasMainWindow(QMainWindow):
     def documentation(self, *args):
         """Show reference documentation.
         """
-        url = QUrl(LINKS["tutorial"])
+        url = QUrl(LINKS["reference"])
         QDesktopServices.openUrl(url)
 
     def recent_scheme(self, *args):
@@ -1267,13 +1356,9 @@ class CanvasMainWindow(QMainWindow):
         model.deleteLater()
 
         if status == QDialog.Accepted:
-            doc = self.current_document()
-            if doc.isModifiedStrict():
-                if self.ask_save_changes() == QDialog.Rejected:
-                    return QDialog.Rejected
-
+            if not self.pre_close_save():
+                return QDialog.Rejected
             selected = model.item(index)
-
             self.load_scheme(str(selected.path()))
 
         return status
@@ -1305,13 +1390,9 @@ class CanvasMainWindow(QMainWindow):
         dialog.deleteLater()
 
         if status == QDialog.Accepted:
-            doc = self.current_document()
-            if doc.isModifiedStrict():
-                if self.ask_save_changes() == QDialog.Rejected:
-                    return QDialog.Rejected
-
+            if not self.pre_close_save():
+                return QDialog.Rejected
             selected = model.item(index)
-
             new_scheme = self.new_scheme_from(str(selected.path()))
             if new_scheme is not None:
                 self.set_new_scheme(new_scheme)
@@ -1640,11 +1721,8 @@ class CanvasMainWindow(QMainWindow):
     def _on_recent_scheme_action(self, action):
         """A recent scheme action was triggered by the user
         """
-        document = self.current_document()
-        if document.isModifiedStrict():
-            if self.ask_save_changes() == QDialog.Rejected:
-                return
-
+        if not self.pre_close_save():
+            return QDialog.Rejected
         filename = str(action.data())
         self.load_scheme(filename)
 
@@ -1677,11 +1755,11 @@ class CanvasMainWindow(QMainWindow):
         """Close the main window.
         """
         document = self.current_document()
-        if document.isModifiedStrict():
-            if self.ask_save_changes() == QDialog.Rejected:
-                # Reject the event
-                event.ignore()
-                return
+        if document.isModifiedStrict() and \
+                self.ask_save_changes() == QDialog.Rejected or \
+                self.ask_save_report() == QDialog.Rejected:
+            event.ignore()
+            return
 
         old_scheme = document.scheme()
 

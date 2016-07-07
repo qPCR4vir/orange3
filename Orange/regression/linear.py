@@ -4,9 +4,11 @@ import sklearn.linear_model as skl_linear_model
 import sklearn.pipeline as skl_pipeline
 import sklearn.preprocessing as skl_preprocessing
 
-from Orange.regression import Learner, Model, SklLearner, SklModel
 from Orange.data import Variable, ContinuousVariable
+from Orange.preprocess import Continuize, Normalize, RemoveNaNColumns, SklImpute
 from Orange.preprocess.score import LearnerScorer
+from Orange.regression import Learner, Model, SklLearner, SklModel
+
 
 __all__ = ["LinearRegressionLearner", "RidgeRegressionLearner",
            "LassoRegressionLearner", "SGDRegressionLearner",
@@ -18,8 +20,10 @@ class _FeatureScorerMixin(LearnerScorer):
     feature_type = Variable
     class_type = ContinuousVariable
 
-    def score(self, model):
-        return np.abs(model.skl_model.coef_)
+    def score(self, data):
+        data = Normalize(data)
+        model = self(data)
+        return np.abs(model.coefficients)
 
 
 class LinearRegressionLearner(SklLearner, _FeatureScorerMixin):
@@ -30,12 +34,11 @@ class LinearRegressionLearner(SklLearner, _FeatureScorerMixin):
         super().__init__(preprocessors=preprocessors)
 
     def fit(self, X, Y, W):
-        sk = skl_linear_model.LinearRegression()
-        sk.fit(X, Y)
-        return LinearModel(sk)
+        model = super().fit(X, Y, W)
+        return LinearModel(model.skl_model)
 
 
-class RidgeRegressionLearner(SklLearner, _FeatureScorerMixin):
+class RidgeRegressionLearner(LinearRegressionLearner):
     __wraps__ = skl_linear_model.Ridge
     name = 'ridge'
 
@@ -46,7 +49,7 @@ class RidgeRegressionLearner(SklLearner, _FeatureScorerMixin):
         self.params = vars()
 
 
-class LassoRegressionLearner(SklLearner, _FeatureScorerMixin):
+class LassoRegressionLearner(LinearRegressionLearner):
     __wraps__ = skl_linear_model.Lasso
     name = 'lasso'
 
@@ -58,7 +61,7 @@ class LassoRegressionLearner(SklLearner, _FeatureScorerMixin):
         self.params = vars()
 
 
-class ElasticNetLearner(SklLearner):
+class ElasticNetLearner(LinearRegressionLearner):
     __wraps__ = skl_linear_model.ElasticNet
     name = 'elastic'
 
@@ -70,7 +73,7 @@ class ElasticNetLearner(SklLearner):
         self.params = vars()
 
 
-class ElasticNetCVLearner(SklLearner):
+class ElasticNetCVLearner(LinearRegressionLearner):
     __wraps__ = skl_linear_model.ElasticNetCV
     name = 'elasticCV'
 
@@ -82,7 +85,7 @@ class ElasticNetCVLearner(SklLearner):
         self.params = vars()
 
 
-class SGDRegressionLearner(SklLearner):
+class SGDRegressionLearner(LinearRegressionLearner):
     __wraps__ = skl_linear_model.SGDRegressor
     name = 'sgd'
 
@@ -103,6 +106,9 @@ class SGDRegressionLearner(SklLearner):
 
 class PolynomialLearner(Learner):
     name = 'poly learner'
+    preprocessors = [Continuize(),
+                     RemoveNaNColumns(),
+                     SklImpute()]
 
     def __init__(self, learner, degree=1, preprocessors=None):
         super().__init__(preprocessors=preprocessors)
@@ -121,6 +127,14 @@ class PolynomialLearner(Learner):
 
 
 class LinearModel(SklModel):
+    @property
+    def intercept(self):
+        return self.skl_model.intercept_
+
+    @property
+    def coefficients(self):
+        return self.skl_model.coef_
+
     def predict(self, X):
         vals = self.skl_model.predict(X)
         if len(vals.shape) == 1:
@@ -146,3 +160,6 @@ class PolynomialModel(Model):
 
     def __str__(self):
         return 'PolynomialModel {}'.format(self.model)
+
+
+PolynomialLearner.__returns__ = PolynomialModel

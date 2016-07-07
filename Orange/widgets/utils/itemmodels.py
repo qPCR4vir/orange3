@@ -1,6 +1,9 @@
 import pickle
+from numbers import Number, Integral
+from math import isnan, isinf
+
 import operator
-from collections import namedtuple
+from collections import namedtuple, Sequence, defaultdict
 from contextlib import contextmanager
 from functools import reduce, partial, lru_cache
 from xml.sax.saxutils import escape
@@ -29,14 +32,12 @@ class _store(dict):
 
 def _argsort(seq, cmp=None, key=None, reverse=False):
     if key is not None:
-        items = sorted(enumerate(seq), key=lambda pair: key(pair[1]))
+        return sorted(enumerate(seq), key=lambda pair: key(pair[1]), reverse=reverse)
     elif cmp is not None:
-        items = sorted(enumerate(seq), cmp=lambda a, b: cmp(a[1], b[1]))
+        from functools import cmp_to_key
+        return sorted(enumerate(seq), key=cmp_to_key(lambda a, b: cmp(a[1], b[1])), reverse=reverse)
     else:
-        items = sorted(enumerate(seq), key=operator.itemgetter(1))
-    if reverse:
-        items = reversed(items)
-    return items
+        return sorted(enumerate(seq), key=operator.itemgetter(1), reverse=reverse)
 
 
 @contextmanager
@@ -49,13 +50,237 @@ def signal_blocking(obj):
         obj.blockSignals(blocked)
 
 
-def _as_contiguous_range(start, stop, step):
+def _as_contiguous_range(the_slice, length):
+    start, stop, step = the_slice.indices(length)
     if step == -1:
         # Equivalent range with positive step
-        start, stop = stop + 1, start + 1
+        start, stop, step = stop + 1, start + 1, 1
     elif not (step == 1 or step is None):
         raise IndexError("Non-contiguous range.")
     return start, stop, step
+
+
+class PyTableModel(QAbstractTableModel):
+    """ A model for displaying python tables (sequences of sequences) in
+    QTableView objects.
+
+    Parameters
+    ----------
+    sequence : list
+        The initial list to wrap.
+    parent : QObject
+        Parent QObject.
+    editable: bool or sequence
+        If True, all items are flagged editable. If sequence, the True-ish
+        fields mark their respective columns editable.
+
+    Notes
+    -----
+    The model rounds numbers to human readable precision, e.g.:
+    1.23e-04, 1.234, 1234.5, 12345, 1.234e06.
+
+    To set additional item roles, use setData().
+    """
+
+    @staticmethod
+    def _RoleData():
+        return defaultdict(lambda: defaultdict(dict))
+
+    # All methods are either necessary overrides of super methods, or
+    # methods likened to the Python list's. Hence, docstrings aren't.
+    # pylint: disable=missing-docstring
+    def __init__(self, sequence=None, parent=None, editable=False):
+        super().__init__(parent)
+        self._headers = {}
+        self._editable = editable
+        self._table = None
+        self._roleData = None
+        self.wrap(sequence or [])
+
+    def rowCount(self, parent=QModelIndex()):
+        return 0 if parent.isValid() else len(self)
+
+    def columnCount(self, parent=QModelIndex()):
+        return 0 if parent.isValid() else max(map(len, self._table), default=0)
+
+    def flags(self, index):
+        flags = super().flags(index)
+        if not self._editable or not index.isValid():
+            return flags
+        if isinstance(self._editable, Sequence):
+            return flags | Qt.ItemIsEditable if self._editable[index.column()] else flags
+        return flags | Qt.ItemIsEditable
+
+    def setData(self, index, value, role):
+        if role == Qt.EditRole:
+            self[index.row()][index.column()] = value
+            self.dataChanged.emit(index, index)
+        else:
+            self._roleData[index.row()][index.column()][role] = value
+        return True
+
+    def data(self, index, role=Qt.DisplayRole):
+        if not index.isValid():
+            return
+
+        role_value = (self._roleData
+                      .get(index.row(), {})
+                      .get(index.column(), {})
+                      .get(role))
+        if role_value is not None:
+            return role_value
+
+        try:
+            value = self[index.row()][index.column()]
+        except IndexError:
+            return
+        if role == Qt.EditRole:
+            return value
+        if role == Qt.DecorationRole and isinstance(value, Variable):
+            return gui.attributeIconDict[value]
+        if role == Qt.DisplayRole:
+            if (isinstance(value, Number) and
+                    not (isnan(value) or isinf(value) or isinstance(value, Integral))):
+                absval = abs(value)
+                strlen = len(str(int(absval)))
+                value = '{:.{}{}}'.format(value,
+                                          2 if absval < .001 else
+                                          3 if strlen < 2 else
+                                          1 if strlen < 5 else
+                                          0 if strlen < 6 else
+                                          3,
+                                          'f' if strlen < 6 and absval >= .001 else 'e')
+            return str(value)
+        if role == Qt.TextAlignmentRole and isinstance(value, Number):
+            return Qt.AlignRight | Qt.AlignVCenter
+        if role == Qt.ToolTipRole:
+            return str(value)
+
+    def sort(self, column, order=Qt.AscendingOrder):
+        self.beginResetModel()
+        indices = sorted(range(len(self._table)),
+                         key=lambda i: self._table[i][column],
+                         reverse=order != Qt.AscendingOrder)
+        self._table[:] = [self._table[i] for i in indices]
+
+        rd = self._roleData
+        self._roleData = self._RoleData()
+        self._roleData.update((i, rd.get(row))
+                              for i, row in enumerate(indices)
+                              if rd.get(row))
+
+        vheaders = self._headers.get(Qt.Vertical, ())
+        if vheaders:
+            vheaders = tuple(vheaders) + ('',) * max(0, (len(self._table) - len(vheaders)))
+            vheaders = [vheaders[i] for i in indices]
+            self._headers[Qt.Vertical] = vheaders
+        self.endResetModel()
+
+    def setHorizontalHeaderLabels(self, labels):
+        self._headers[Qt.Horizontal] = labels
+
+    def setVerticalHeaderLabels(self, labels):
+        self._headers[Qt.Vertical] = labels
+
+    def headerData(self, section, orientation, role=Qt.DisplayRole):
+        if role == Qt.DisplayRole:
+            headers = self._headers.get(orientation)
+            return headers[section] if headers and section < len(headers) else str(section)
+
+    def removeRows(self, row, count, parent=QModelIndex()):
+        if not parent.isValid():
+            del self[row:row + count]
+            for row in range(row, row + count):
+                self._roleData.pop(row, None)
+            return True
+        return False
+
+    def removeColumns(self, column, count, parent=QModelIndex()):
+        self.beginRemoveColumns(parent, column, column + count - 1)
+        for row in self._table:
+            del row[column:column + count]
+        for cols in self._roleData.values():
+            for col in range(column, column + count):
+                cols.pop(col, None)
+        del self._headers.get(Qt.Horizontal, [])[column:column + count]
+        self.endRemoveColumns()
+
+    def insertRows(self, row, count, parent=QModelIndex()):
+        self.beginInsertRows(parent, row, row + count - 1)
+        self._table[row:row] = [[''] * self.columnCount() for _ in range(count)]
+        self.endInsertRows()
+
+    def insertColumns(self, column, count, parent=QModelIndex()):
+        self.beginInsertColumns(parent, column, column + count - 1)
+        for row in self._table:
+            row[column:column] = [''] * count
+        self.endInsertColumns()
+
+    def __len__(self):
+        return len(self._table)
+
+    def __bool__(self):
+        return len(self) != 0
+
+    def __iter__(self):
+        return iter(self._table)
+
+    def __getitem__(self, item):
+        return self._table[item]
+
+    def __delitem__(self, i):
+        if isinstance(i, slice):
+            start, stop, _ = _as_contiguous_range(i, len(self))
+            stop -= 1
+        else:
+            start = stop = i = i if i >= 0 else len(self) + i
+        self.beginRemoveRows(QModelIndex(), start, stop)
+        del self._table[i]
+        self.endRemoveRows()
+
+    def __setitem__(self, i, value):
+        if isinstance(i, slice):
+            start, stop, _ = _as_contiguous_range(i, len(self))
+            stop -= 1
+        else:
+            start = stop = i = i if i >= 0 else len(self) + i
+        self._table[i] = value
+        self.dataChanged.emit(self.index(start, 0),
+                              self.index(stop, self.columnCount() - 1))
+
+    def wrap(self, table):
+        self.beginResetModel()
+        self._table = table
+        self._roleData = self._RoleData()
+        self.endResetModel()
+
+    def clear(self):
+        self.beginResetModel()
+        self._table.clear()
+        self._roleData.clear()
+        self.endResetModel()
+
+    def append(self, row):
+        self.extend([row])
+
+    def _insertColumns(self, rows):
+        n_max = max(map(len, rows))
+        if self.columnCount() < n_max:
+            self.insertColumns(self.columnCount(), n_max - self.columnCount())
+
+    def extend(self, rows):
+        i, rows = len(self), list(rows)
+        self.insertRows(i, len(rows))
+        self._insertColumns(rows)
+        self[i:] = rows
+
+    def insert(self, i, row):
+        self.insertRows(i, 1)
+        self._insertColumns((row,))
+        self[i] = row
+
+    def remove(self, val):
+        del self[self._table.index(val)]
 
 
 class PyListModel(QAbstractListModel):
@@ -91,9 +316,10 @@ class PyListModel(QAbstractListModel):
         """ Wrap the list with this model. All changes to the model
         are done in place on the passed list
         """
+        self.beginResetModel()
         self._list = lst
         self._other_data = [_store() for _ in lst]
-        self.reset()
+        self.endResetModel()
 
 
     # noinspection PyMethodOverriding
@@ -215,6 +441,12 @@ class PyListModel(QAbstractListModel):
         self.__delitem__(i)
         return item
 
+    def indexOf(self, value):
+        return self._list.index(value)
+
+    def clear(self):
+        del self[:]
+
     def __len__(self):
         return len(self._list)
 
@@ -240,10 +472,10 @@ class PyListModel(QAbstractListModel):
 
     def __delitem__(self, s):
         if isinstance(s, slice):
-            start, stop, step = s.indices(len(self))
-            start, stop, step = _as_contiguous_range(start, stop, step)
+            start, stop, step = _as_contiguous_range(s, len(self))
             self.beginRemoveRows(QModelIndex(), start, stop - 1)
         else:
+            s = operator.index(s)
             s = len(self) + s if s < 0 else s
             self.beginRemoveRows(QModelIndex(), s, s)
         del self._list[s]
@@ -252,21 +484,21 @@ class PyListModel(QAbstractListModel):
 
     def __setitem__(self, s, value):
         if isinstance(s, slice):
-            start, stop, step = s.indices(len(self))
-            start, stop, step = _as_contiguous_range(start, stop, step)
+            start, stop, step = _as_contiguous_range(s, len(self))
             self.__delitem__(slice(start, stop, step))
 
             if not isinstance(value, list):
                 value = list(value)
             separators = [start + i for i, v in enumerate(value) if v is self.Separator]
             self.beginInsertRows(QModelIndex(), start, start + len(value) - 1)
-            self._list[s] = value
-            self._other_data[s] = (_store() for _ in value)
+            self._list[start:start] = value
+            self._other_data[start:start] = (_store() for _ in value)
             for idx in separators:
                 self._other_data[idx]['flags'] = Qt.NoItemFlags
                 self._other_data[idx][Qt.AccessibleDescriptionRole] = 'separator'
             self.endInsertRows()
         else:
+            s = operator.index(s)
             s = len(self) + s if s < 0 else s
             self._list[s] = value
             self._other_data[s] = _store()
@@ -413,7 +645,7 @@ _html_replace = [("<", "&lt;"), (">", "&gt;")]
 
 def safe_text(text):
     for old, new in _html_replace:
-        text = text.replace(old, new)
+        text = str(text).replace(old, new)
     return text
 
 
@@ -518,13 +750,13 @@ class TableModel(QAbstractTableModel):
     DomainRole = next(gui.OrangeUserRole)
 
     #: Column domain roles
-    Attribute, ClassVar, Meta = range(3)
+    ClassVar, Meta, Attribute = range(3)
 
     #: Default background color for domain roles
     ColorForRole = {
-        Attribute: None,
         ClassVar: QColor(160, 160, 160),
-        Meta: QColor(220, 220, 200)
+        Meta: QColor(220, 220, 200),
+        Attribute: None,
     }
 
     #: Standard column descriptor
@@ -581,14 +813,6 @@ class TableModel(QAbstractTableModel):
 
         columns = []
 
-        if self.X_density != Storage.DENSE:
-            coldesc = make_basket(domain.attributes, self.X_density,
-                                  TableModel.Attribute)
-            columns.append(coldesc)
-        else:
-            columns += [make_column(var, TableModel.Attribute)
-                        for var in domain.attributes]
-
         if self.Y_density != Storage.DENSE:
             coldesc = make_basket(domain.class_vars, self.Y_density,
                                   TableModel.ClassVar)
@@ -605,8 +829,16 @@ class TableModel(QAbstractTableModel):
             columns += [make_column(var, TableModel.Meta)
                         for var in domain.metas]
 
-        #: list of all domain variables (attrs + class_vars + metas)
-        self.vars = domain.attributes + domain.class_vars + domain.metas
+        if self.X_density != Storage.DENSE:
+            coldesc = make_basket(domain.attributes, self.X_density,
+                                  TableModel.Attribute)
+            columns.append(coldesc)
+        else:
+            columns += [make_column(var, TableModel.Attribute)
+                        for var in domain.attributes]
+
+        #: list of all domain variables (class_vars + metas + attrs)
+        self.vars = domain.class_vars + domain.metas + domain.attributes
         self.columns = columns
 
         #: A list of all unique attribute labels (in all variables)
@@ -788,7 +1020,15 @@ class TableModel(QAbstractTableModel):
         if self.__sortInd is not None:
             row = self.__sortInd[row]
 
-        instance = self._row_instance(row)
+        try:
+            instance = self._row_instance(row)
+        except IndexError:
+            self.layoutAboutToBeChanged.emit()
+            self.beginRemoveRows(self.parent(), row, max(self.rowCount(), row))
+            self.__rowCount = min(row, self.__rowCount)
+            self.endRemoveRows()
+            self.layoutChanged.emit()
+            return None
         coldesc = self.columns[col]
 
         if role == _Qt_DisplayRole:
@@ -827,7 +1067,7 @@ class TableModel(QAbstractTableModel):
         else:
             return False
 
-    def parent(self, index):
+    def parent(self, index=QModelIndex()):
         """Reimplemented from `QAbstractTableModel.parent`."""
         return QModelIndex()
 

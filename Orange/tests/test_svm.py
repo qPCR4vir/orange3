@@ -1,8 +1,10 @@
+# Test methods with long descriptive names can omit docstrings
+# pylint: disable=missing-docstring
+
 import unittest
 
 import numpy as np
 
-import Orange
 from Orange.classification import (SVMLearner, LinearSVMLearner,
                                    NuSVMLearner, OneClassSVMLearner)
 from Orange.regression import (SVRLearner, NuSVRLearner)
@@ -10,10 +12,11 @@ from Orange.data import Table, Domain, ContinuousVariable
 from Orange.evaluation import CrossValidation, CA, RMSE
 
 
-class SVMTest(unittest.TestCase):
-    def setUp(self):
-        self.data = Table('ionosphere')
-        self.data.shuffle()
+class TestSVMLearner(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.data = Table('ionosphere')
+        cls.data.shuffle()
 
     def test_SVM(self):
         learn = SVMLearner()
@@ -23,7 +26,8 @@ class SVMTest(unittest.TestCase):
     def test_LinearSVM(self):
         learn = LinearSVMLearner()
         res = CrossValidation(self.data, [learn], k=2)
-        self.assertTrue(0.8 < CA(res)[0] < 0.9)
+        self.assertGreater(CA(res)[0], 0.8)
+        self.assertLess(CA(res)[0], 0.9)
 
     def test_NuSVM(self):
         learn = NuSVMLearner(nu=0.01)
@@ -65,8 +69,8 @@ class SVMTest(unittest.TestCase):
         n_pred_in_true_in = np.sum(y_pred[:n_true_in] == 1)
         n_pred_out_true_out = np.sum(y_pred[- n_true_out:] == -1)
 
-        self.assertTrue(all(np.absolute(y_pred) == 1))
-        self.assertTrue(n_pred_out_all <= len(X_all) * nu)
-        self.assertTrue(np.absolute(n_pred_out_all - n_true_out) < 2)
-        self.assertTrue(np.absolute(n_pred_in_true_in - n_true_in) < 4)
-        self.assertTrue(np.absolute(n_pred_out_true_out - n_true_out) < 3)
+        self.assertEqual(np.absolute(y_pred).all(), 1)
+        self.assertLessEqual(n_pred_out_all, len(X_all) * nu)
+        self.assertLess(np.absolute(n_pred_out_all - n_true_out), 2)
+        self.assertLess(np.absolute(n_pred_in_true_in - n_true_in), 4)
+        self.assertLess(np.absolute(n_pred_out_true_out - n_true_out), 3)

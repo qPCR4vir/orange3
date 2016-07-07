@@ -1,11 +1,19 @@
+# Test methods with long descriptive names can omit docstrings
+# pylint: disable=missing-docstring
+
 import unittest
 
 import numpy as np
 from Orange.data import Table
 from Orange.preprocess import Remove
-
+from Orange.tests import test_filename
 
 class TestRemover(unittest.TestCase):
+
+    @classmethod
+    def setUpClass(cls):
+        cls.test8 = Table(test_filename('test8.tab'))
+
     def test_remove(self):
         data = Table("iris")[:5]
         attr_flags = sum([Remove.SortValues,
@@ -27,7 +35,7 @@ class TestRemover(unittest.TestCase):
                              {'removed': 1, 'reduced': 0, 'sorted': 0})
 
     def test_remove_constant_attr(self):
-        data = Table("test8.tab")
+        data = self.test8
         remover = Remove(Remove.RemoveConstant)
         new_data = remover(data)
         attr_res, class_res = remover.attr_results, remover.class_results
@@ -49,7 +57,7 @@ class TestRemover(unittest.TestCase):
                              {'removed': 0, 'reduced': 0, 'sorted': 0})
 
     def test_remove_constant_class(self):
-        data = Table("test8.tab")
+        data = self.test8
         remover = Remove(class_flags=Remove.RemoveConstant)
         new_data = remover(data)
         attr_res, class_res = remover.attr_results, remover.class_results
@@ -71,7 +79,7 @@ class TestRemover(unittest.TestCase):
                              {'removed': 2, 'reduced': 0, 'sorted': 0})
 
     def test_remove_unused_values_attr(self):
-        data = Table("test8.tab")
+        data = self.test8
         data = data[1:]
         remover = Remove(Remove.RemoveUnusedValues)
         new_data = remover(data)
@@ -93,7 +101,7 @@ class TestRemover(unittest.TestCase):
                              {'removed': 0, 'reduced': 0, 'sorted': 0})
 
     def test_remove_unused_values_class(self):
-        data = Table("test8.tab")
+        data = self.test8
         data = data[:2]
         remover = Remove(class_flags=Remove.RemoveUnusedValues)
         new_data = remover(data)
@@ -117,7 +125,7 @@ class TestRemover(unittest.TestCase):
                              {'removed': 0, 'reduced': 1, 'sorted': 0})
 
     def test_remove_unused_values_metas(self):
-        data = Table("test9.tab")
+        data = Table(test_filename("test9.tab"))
         subset = data[:4]
         res = Remove(subset,
                      attr_flags=Remove.RemoveUnusedValues,

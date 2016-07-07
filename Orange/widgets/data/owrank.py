@@ -8,12 +8,17 @@ Rank (score) features for prediction.
 
 from collections import namedtuple
 
+import numpy as np
+from scipy.sparse import issparse
+
 from PyQt4 import QtGui
 from PyQt4.QtCore import Qt
 
 import Orange
-from Orange.data import ContinuousVariable, DiscreteVariable
+from Orange.base import Learner
+from Orange.data import ContinuousVariable, DiscreteVariable, Domain, StringVariable
 from Orange.preprocess import score
+from Orange.canvas import report
 from Orange.widgets import widget, settings, gui
 from Orange.widgets.utils.sql import check_sql_input
 
@@ -36,8 +41,12 @@ SCORES = [
     score_meta("Information Gain", "Inf. gain", score.InfoGain),
     score_meta("Gain Ratio", "Gain Ratio", score.GainRatio),
     score_meta("Gini Gain", "Gini", score.Gini),
+    score_meta("ANOVA", "ANOVA", score.ANOVA),
+    score_meta("Chi2", "Chi2", score.Chi2),
+    score_meta("Univariate Linear Regression", "Univar. Lin. Reg.", score.UnivariateLinearRegression),
     score_meta("ReliefF", "ReliefF", score.ReliefF),
     score_meta("RReliefF", "RReliefF", score.RReliefF),
+    score_meta("FCBF", "FCBF", score.FCBF),
 ]
 
 _DEFAULT_SELECTED = set(m.name for m in SCORES)
@@ -49,9 +58,12 @@ class OWRank(widget.OWWidget):
     icon = "icons/Rank.svg"
     priority = 1102
 
+    buttons_area_orientation = Qt.Vertical
+
     inputs = [("Data", Orange.data.Table, "setData"),
               ("Scorer", score.Scorer, "set_learner", widget.Multiple)]
-    outputs = [("Reduced Data", Orange.data.Table)]
+    outputs = [("Reduced Data", Orange.data.Table, widget.Default),
+               ("Scores", Orange.data.Table)]
 
     SelectNone, SelectAll, SelectManual, SelectNBest = range(4)
 
@@ -64,6 +76,7 @@ class OWRank(widget.OWWidget):
 
     def __init__(self):
         super().__init__()
+        self.out_domain_desc = None
 
         self.all_measures = SCORES
 
@@ -82,11 +95,11 @@ class OWRank(widget.OWWidget):
         self.contMeasures = [m for m in self.all_measures
                              if issubclass(ContinuousVariable, m.score.class_type)]
 
-        selMethBox = gui.widgetBox(
-            self.controlArea, "Select attributes", addSpace=True)
+        selMethBox = gui.vBox(
+                self.controlArea, "Select Attributes", addSpace=True)
 
         grid = QtGui.QGridLayout()
-        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setContentsMargins(6, 0, 6, 0)
         self.selectButtons = QtGui.QButtonGroup()
         self.selectButtons.buttonClicked[int].connect(self.setSelectMethod)
 
@@ -100,7 +113,7 @@ class OWRank(widget.OWWidget):
         b1 = button(self.tr("None"), OWRank.SelectNone)
         b2 = button(self.tr("All"), OWRank.SelectAll)
         b3 = button(self.tr("Manual"), OWRank.SelectManual)
-        b4 = button(self.tr("Best ranked"), OWRank.SelectNBest)
+        b4 = button(self.tr("Best ranked:"), OWRank.SelectNBest)
 
         s = gui.spin(selMethBox, self, "nSelected", 1, 100,
                      callback=self.nSelectedChanged)
@@ -115,8 +128,7 @@ class OWRank(widget.OWWidget):
 
         selMethBox.layout().addLayout(grid)
 
-        gui.auto_commit(self.controlArea, self, "auto_apply", "Commit",
-                        checkbox_label="Commit on any change")
+        gui.auto_commit(self.buttonsArea, self, "auto_apply", "Send", box=False)
 
         gui.rubber(self.controlArea)
 
@@ -147,6 +159,9 @@ class OWRank(widget.OWWidget):
         self.discRanksView.horizontalHeader().sectionClicked.connect(
             self.headerClick
         )
+        self.discRanksView.verticalHeader().sectionClicked.connect(
+            self.onSelectItem
+        )
 
         if self.headerState[0] is not None:
             self.discRanksView.horizontalHeader().restoreState(
@@ -167,7 +182,7 @@ class OWRank(widget.OWWidget):
         self.contRanksProxyModel.setSourceModel(self.contRanksModel)
         self.contRanksView.setModel(self.contRanksProxyModel)
 
-        self.discRanksView.setColumnWidth(0, 20)
+        self.contRanksView.setColumnWidth(0, 20)
         self.contRanksView.sortByColumn(1, Qt.DescendingOrder)
         self.contRanksView.selectionModel().selectionChanged.connect(
             self.commit
@@ -176,6 +191,10 @@ class OWRank(widget.OWWidget):
         self.contRanksView.horizontalHeader().sectionClicked.connect(
             self.headerClick
         )
+        self.contRanksView.verticalHeader().sectionClicked.connect(
+            self.onSelectItem
+        )
+
         if self.headerState[1] is not None:
             self.contRanksView.horizontalHeader().restoreState(
             self.headerState[1]
@@ -214,6 +233,7 @@ class OWRank(widget.OWWidget):
 
     @check_sql_input
     def setData(self, data):
+        self.information([0])
         self.error([0, 100])
         self.resetInternals()
 
@@ -236,6 +256,10 @@ class OWRank(widget.OWWidget):
                 self.error(0, "Cannot handle class variable type %r" %
                            type(self.data.domain.class_var).__name__)
 
+            if issparse(self.data.X):   # keep only measures supporting sparse data
+                self.measures = [m for m in self.measures
+                                 if m.score.supports_sparse_data]
+
             self.ranksModel.setRowCount(len(attrs))
             for i, a in enumerate(attrs):
                 if a.is_discrete:
@@ -252,6 +276,8 @@ class OWRank(widget.OWWidget):
             shape = (len(self.measures) + len(self.learners), len(attrs))
             self.measure_scores = table(shape, None)
             self.updateScores()
+        else:
+            self.send("Scores", None)
 
         self.selectMethodChanged()
         self.commit()
@@ -268,13 +294,8 @@ class OWRank(widget.OWWidget):
         attrs_len = 0 if not self.data else len(self.data.domain.attributes)
         shape = (len(self.measures) + len(self.learners), attrs_len)
         self.measure_scores = table(shape, None)
-        labels = [v.shortname for k, v in self.learners.items()]
-        self.contRanksModel.setHorizontalHeaderLabels(
-            self.contRanksLabels + labels
-        )
-        self.discRanksModel.setHorizontalHeaderLabels(
-            self.discRanksLabels + labels
-        )
+        self.contRanksModel.setHorizontalHeaderLabels(self.contRanksLabels)
+        self.discRanksModel.setHorizontalHeaderLabels(self.discRanksLabels)
         self.updateScores()
         self.commit()
 
@@ -288,6 +309,8 @@ class OWRank(widget.OWWidget):
         """
         if not self.data:
             return
+        if self.data.has_missing():
+            self.information(0, "Missing values have been imputed.")
 
         measures = self.measures + [v for k, v in self.learners.items()]
         # Invalidate all warnings
@@ -303,32 +326,55 @@ class OWRank(widget.OWWidget):
 
         data = self.data
         self.error(1)
+        learner_col = len(self.measures)
+        labels = []
         for index, (meas, mask) in enumerate(zip(measures, measuresMask)):
             if not mask:
                 continue
             if index < len(self.measures):
                 estimator = meas.score()
-                self.measure_scores[index] = estimator(data)
+                try:
+                    self.measure_scores[index] = estimator(data)
+                except ValueError:
+                    self.measure_scores[index] = []
+                    for attr in data.domain.attributes:
+                        try:
+                            self.measure_scores[index].append(estimator(data,attr))
+                        except ValueError:
+                            self.measure_scores[index].append(None)
             else:
                 learner = meas.score
-                if not learner.check_learner_adequacy(self.data.domain):
+                if isinstance(learner, Learner) and \
+                        not learner.check_learner_adequacy(self.data.domain):
                     self.error(1, learner.learner_adequacy_err_msg)
                 else:
-                    self.measure_scores[index] = meas.score.score_data(data)
-
+                    scores = meas.score.score_data(data)
+                    for i, row in enumerate(scores):
+                        labels.append(meas.shortname + str(i + 1))
+                        if len(self.measure_scores) > learner_col:
+                            self.measure_scores[learner_col] = row
+                        else:
+                            self.measure_scores.append(row)
+                        learner_col += 1
+        self.contRanksModel.setHorizontalHeaderLabels(
+            self.contRanksLabels + labels
+        )
+        self.discRanksModel.setHorizontalHeaderLabels(
+            self.discRanksLabels + labels
+        )
         self.updateRankModel(measuresMask)
         self.ranksProxyModel.invalidate()
+        self.selectMethodChanged()
 
-        if self.selectMethod in [0, 2]:
-            self.autoSelection()
+        self.send("Scores", self.create_scores_table(labels))
 
     def updateRankModel(self, measuresMask=None):
         """
         Update the rankModel.
         """
         values = []
-        for i in range(len(self.measure_scores) + 1,
-                       self.ranksModel.columnCount()):
+        for i in range(self.ranksModel.columnCount() - 1,
+                       len(self.measure_scores), -1):
             self.ranksModel.removeColumn(i)
 
         for i, scores in enumerate(self.measure_scores):
@@ -379,6 +425,7 @@ class OWRank(widget.OWWidget):
         if self.selectMethod in [OWRank.SelectNone, OWRank.SelectAll,
                                  OWRank.SelectNBest]:
             self.autoSelection()
+        self.ranksView.setFocus()
 
     def nSelectedChanged(self):
         self.selectMethod = OWRank.SelectNBest
@@ -398,8 +445,6 @@ class OWRank(widget.OWWidget):
                 model.index(0, 0),
                 model.index(rowCount - 1, columnCount - 1)
             )
-            selModel.select(selection,
-                            QtGui.QItemSelectionModel.ClearAndSelect)
         elif self.selectMethod == OWRank.SelectNBest:
             nSelected = min(self.nSelected, rowCount)
             selection = QtGui.QItemSelection(
@@ -456,19 +501,25 @@ class OWRank(widget.OWWidget):
             gui.ColoredBarItemDelegate(self)
         )
 
-    def sendReport(self):
-        self.reportData(self.data)
-        self.reportRaw(gui.reportTable(self.ranksView))
+    def send_report(self):
+        if not self.data:
+            return
+        self.report_domain("Input", self.data.domain)
+        self.report_table("Ranks", self.ranksView, num_format="{:.3f}")
+        if self.out_domain_desc is not None:
+            self.report_items("Output", self.out_domain_desc)
 
     def commit(self):
         selected = self.selectedAttrs()
         if not self.data or not selected:
             self.send("Reduced Data", None)
+            self.out_domain_desc = None
         else:
             domain = Orange.data.Domain(selected, self.data.domain.class_var,
                                         metas=self.data.domain.metas)
             data = Orange.data.Table(domain, self.data)
             self.send("Reduced Data", data)
+            self.out_domain_desc = report.describe_domain(data.domain)
 
     def selectedAttrs(self):
         if self.data:
@@ -479,6 +530,21 @@ class OWRank(widget.OWWidget):
             return [self.data.domain.attributes[i] for i in inds]
         else:
             return []
+
+    def create_scores_table(self, labels):
+        measures = self.measures + [(label,) for label in labels]
+        features = [ContinuousVariable(s[0]) for s in measures]
+        metas = [StringVariable("Feature name")]
+        domain = Domain(features, metas=metas)
+
+        scores = np.array(self.measure_scores).T
+        feature_names = np.array([a.name for a in self.data.domain.attributes])
+        # Reshape to 2d array as Table does not like 1d arrays
+        feature_names = feature_names[:, None]
+
+        table = Orange.data.Table(domain, scores, metas=feature_names)
+        table.name = "Feature Scores"
+        return table
 
 
 class ScoreValueItem(QtGui.QStandardItem):
@@ -502,10 +568,19 @@ class ScoreValueItem(QtGui.QStandardItem):
 
 
 class MySortProxyModel(QtGui.QSortFilterProxyModel):
+
+    @staticmethod
+    def comparable(val):
+        return val is not None and float('-inf') < val < float('inf')
+
     def lessThan(self, left, right):
         role = self.sortRole()
         left_data = left.data(role)
+        if not self.comparable(left_data):
+            left_data = float('-inf')
         right_data = right.data(role)
+        if not self.comparable(right_data):
+            right_data = float('-inf')
         try:
             return left_data < right_data
         except TypeError:

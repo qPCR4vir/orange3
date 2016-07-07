@@ -65,7 +65,7 @@ class PythonSyntaxHighlighter(QtGui.QSyntaxHighlighter):
             index = exp.indexIn(text)
             while index >= 0:
                 length = exp.matchedLength()
-                if exp.numCaptures() > 0:
+                if exp.captureCount() > 0:
                     self.setFormat(exp.pos(1), len(str(exp.cap(1))), format)
                 else:
                     self.setFormat(exp.pos(0), len(str(exp.cap(0))), format)
@@ -389,7 +389,7 @@ class OWPythonScript(widget.OWWidget):
 
         self._cachedDocuments = {}
 
-        self.infoBox = gui.widgetBox(self.controlArea, 'Info')
+        self.infoBox = gui.vBox(self.controlArea, 'Info')
         gui.label(
             self.infoBox, self,
             "<p>Execute python script.</p><p>Input variables:<ul><li> " + \
@@ -405,7 +405,7 @@ class OWPythonScript(widget.OWWidget):
 
         self.libraryList.wrap(self.libraryListSource)
 
-        self.controlBox = gui.widgetBox(self.controlArea, 'Library')
+        self.controlBox = gui.vBox(self.controlArea, 'Library')
         self.controlBox.layout().setSpacing(1)
 
         self.libraryView = QListView(
@@ -442,8 +442,8 @@ class OWPythonScript(widget.OWWidget):
 
         action = QAction("More", self, toolTip="More actions")
 
-        new_from_file = QAction("Import a script from a file", self)
-        save_to_file = QAction("Save selected script to a file", self)
+        new_from_file = QAction("Import Script from File", self)
+        save_to_file = QAction("Save Selected Script to File", self)
         save_to_file.setShortcut(QKeySequence(QKeySequence.SaveAs))
 
         new_from_file.triggered.connect(self.onAddScriptFromFile)
@@ -460,7 +460,8 @@ class OWPythonScript(widget.OWWidget):
 
         self.controlBox.layout().addWidget(w)
 
-        gui.auto_commit(self.controlArea, self, "auto_execute", "Execute")
+        gui.auto_commit(self.controlArea, self, "auto_execute", "Execute",
+                        auto_label="Auto Execute")
 
         self.splitCanvas = QSplitter(Qt.Vertical, self.mainArea)
         self.mainArea.layout().addWidget(self.splitCanvas)
@@ -468,7 +469,7 @@ class OWPythonScript(widget.OWWidget):
         self.defaultFont = defaultFont = \
             "Monaco" if sys.platform == "darwin" else "Courier"
 
-        self.textBox = gui.widgetBox(self, 'Python script')
+        self.textBox = gui.vBox(self, 'Python Script')
         self.splitCanvas.addWidget(self.textBox)
         self.text = PythonScriptEditor(self)
         self.textBox.layout().addWidget(self.text)
@@ -484,7 +485,7 @@ class OWPythonScript(widget.OWWidget):
         action.setShortcutContext(Qt.WidgetWithChildrenShortcut)
         action.triggered.connect(self.saveScript)
 
-        self.consoleBox = gui.widgetBox(self, 'Console')
+        self.consoleBox = gui.vBox(self, 'Console')
         self.splitCanvas.addWidget(self.consoleBox)
         self.console = PythonConsole(self.__dict__, self)
         self.consoleBox.layout().addWidget(self.console)

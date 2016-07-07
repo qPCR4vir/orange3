@@ -13,7 +13,7 @@ from Orange.widgets.utils.sql import check_sql_input
 
 class OWOutliers(widget.OWWidget):
     name = "Outliers"
-    description = "Detects outliers."
+    description = "Detect outliers."
     icon = "icons/Outliers.svg"
     priority = 3000
     category = "Data"
@@ -28,7 +28,7 @@ class OWOutliers(widget.OWWidget):
 
     outlier_method = Setting(OneClassSVM)
     nu = Setting(50)
-    gamma = Setting(0)
+    gamma = Setting(0.01)
     cont = Setting(10)
     empirical_covariance = Setting(False)
     support_fraction = Setting(1)
@@ -39,17 +39,18 @@ class OWOutliers(widget.OWWidget):
     def __init__(self):
         super().__init__()
         self.data = None
+        self.n_inliers = self.n_outliers = None
 
-        box = gui.widgetBox(self.controlArea, "Information")
+        box = gui.vBox(self.controlArea, "Information")
         self.data_info_label = gui.widgetLabel(box, self.data_info_default)
         self.in_out_info_label = gui.widgetLabel(box,
                                                  self.in_out_info_default)
 
-        box = gui.widgetBox(self.controlArea, "Outlier detection method")
+        box = gui.vBox(self.controlArea, "Outlier Detection Method")
         detection = gui.radioButtons(box, self, "outlier_method")
 
         gui.appendRadioButton(detection,
-                              "One class SVM with non-linear kernel (RBF):")
+                              "One class SVM with non-linear kernel (RBF)")
         ibox = gui.indentedBox(detection)
         tooltip = "An upper bound on the fraction of training errors and a " \
                   "lower bound of the fraction of support vectors"
@@ -59,17 +60,17 @@ class OWOutliers(widget.OWWidget):
             labelFormat="%d %%", callback=self.nu_changed, tooltip=tooltip)
         self.gamma_spin = gui.spin(
             ibox, self, "gamma", label="Kernel coefficient:", step=1e-2,
-            spinType=float, minv=0, maxv=10, callback=self.gamma_changed)
+            spinType=float, minv=0.01, maxv=10, callback=self.gamma_changed)
         gui.separator(detection, 12)
 
-        self.rb_cov = gui.appendRadioButton(detection, "Covariance estimator:")
+        self.rb_cov = gui.appendRadioButton(detection, "Covariance estimator")
         ibox = gui.indentedBox(detection)
         self.l_cov = gui.widgetLabel(ibox, 'Contamination:')
         self.cont_slider = gui.hSlider(
             ibox, self, "cont", minValue=0, maxValue=100, ticks=10,
             labelFormat="%d %%", callback=self.cont_changed)
 
-        ebox = gui.widgetBox(ibox, box=None, orientation='horizontal')
+        ebox = gui.hBox(ibox)
         self.cb_emp_cov = gui.checkBox(
             ebox, self, "empirical_covariance",
             "Support fraction:", callback=self.empirical_changed)
@@ -79,7 +80,7 @@ class OWOutliers(widget.OWWidget):
 
         gui.separator(detection, 12)
 
-        gui.button(self.controlArea, self, "Detect Outliers",
+        gui.button(self.buttonsArea, self, "Detect Outliers",
                    callback=self.commit)
         self.layout().setSizeConstraint(QtGui.QLayout.SetFixedSize)
 
@@ -134,6 +135,7 @@ class OWOutliers(widget.OWWidget):
     def commit(self):
         self.error()
         inliers = outliers = None
+        self.n_inliers = self.n_outliers = None
         if self.data is not None and len(self.data) > 0:
             try:
                 y_pred = self.detect_outliers()
@@ -148,6 +150,8 @@ class OWOutliers(widget.OWWidget):
                                  self.new_data, outliers_ind)
                 self.in_out_info_label.setText('%d inliers, %d outliers' %
                                                (len(inliers), len(outliers)))
+                self.n_inliers = len(inliers)
+                self.n_outliers = len(outliers)
 
         self.send("Inliers", inliers)
         self.send("Outliers", outliers)
@@ -182,6 +186,26 @@ class OWOutliers(widget.OWWidget):
             self.new_domain = self.data.domain
             self.new_data = self.data
 
+    def send_report(self):
+        if self.n_outliers is None or self.n_inliers is None:
+            return
+        self.report_items("Data",
+                          (("Input instances", len(self.data)),
+                           ("Inliers", self.n_inliers),
+                           ("Outliers", self.n_outliers)))
+        if self.outlier_method == 0:
+            self.report_items(
+                "Detection",
+                (("Detection method",
+                  "One class SVM with non-linear kernel (RBF)"),
+                 ("Regularization (nu)", self.nu),
+                 ("Kernel coefficient", self.gamma)))
+        else:
+            self.report_items(
+                "Detection",
+                (("Detection method", "Covariance estimator"),
+                 ("Contamination", self.cont),
+                 ("Support fraction", self.support_fraction)))
 
 def test_main():
     app = QtGui.QApplication([])

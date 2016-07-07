@@ -8,16 +8,16 @@ class LearnerRegression(Learner):
     learner_adequacy_err_msg = "Continuous class variable expected."
 
     def check_learner_adequacy(self, domain):
-        return domain.has_continuous_class or domain.class_var is None
+        return domain.has_continuous_class
 
 
 class ModelRegression(Model):
     pass
 
 
-class SklLearnerRegression(SklLearner, LearnerRegression):
-    pass
-
-
 class SklModelRegression(SklModel, ModelRegression):
     pass
+
+
+class SklLearnerRegression(SklLearner, LearnerRegression):
+    __returns__ = SklModelRegression

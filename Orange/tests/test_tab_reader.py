@@ -1,11 +1,19 @@
+# Test methods with long descriptive names can omit docstrings
+# pylint: disable=missing-docstring
+
 import io
 from os import path
 import unittest
+import tempfile
+import shutil
 
 import numpy as np
 
 from Orange.data import Table, ContinuousVariable, DiscreteVariable
-from Orange.data.io import TabFormat
+from Orange.data.io import TabReader
+
+def read_tab_file(filename):
+    return TabReader(filename).read()
 
 
 class TestTabReader(unittest.TestCase):
@@ -24,9 +32,9 @@ class TestTabReader(unittest.TestCase):
         """
 
         file = io.StringIO(simplefile)
-        table = TabFormat().read_file(file)
+        table = read_tab_file(file)
 
-        f1, f2, c1, c2 = table.domain.variables
+        f1, f2, c1, c2 = table.domain
         self.assertIsInstance(f1, DiscreteVariable)
         self.assertEqual(f1.name, "Feature 1")
         self.assertIsInstance(f2, DiscreteVariable)
@@ -47,7 +55,7 @@ class TestTabReader(unittest.TestCase):
         1.0      \tM        \t5      \trich
         """
         file = io.StringIO(samplefile)
-        table = TabFormat().read_file(file)
+        table = read_tab_file(file)
 
         f1, f2, c1, c2 = table.domain.variables
         self.assertIsInstance(f2, DiscreteVariable)
@@ -59,11 +67,11 @@ class TestTabReader(unittest.TestCase):
         self.assertEqual(c1.attributes, {'x': 'a longer string'})
         outf = io.StringIO()
         outf.close = lambda: None
-        TabFormat.write_file(outf, table)
+        TabReader.write_file(outf, table)
         saved = outf.getvalue()
 
         file = io.StringIO(saved)
-        table = TabFormat().read_file(file)
+        table = read_tab_file(file)
 
         f1, f2, c1, c2 = table.domain.variables
         self.assertIsInstance(f2, DiscreteVariable)
@@ -81,7 +89,7 @@ class TestTabReader(unittest.TestCase):
         1.1\t1.2\t1.5
         """
         file = io.StringIO(samplefile)
-        table = TabFormat().read_file(file)
+        table = read_tab_file(file)
 
         self.assertEqual(len(table), 2)
         self.assertEqual(len(table.domain), 3)
@@ -93,7 +101,7 @@ class TestTabReader(unittest.TestCase):
         1.1\t1.2\t1.5
         """
         file = io.StringIO(samplefile)
-        table = TabFormat().read_file(file)
+        table = read_tab_file(file)
 
         self.assertEqual(len(table), 2)
         self.assertEqual(len(table.domain), 3)
@@ -102,13 +110,13 @@ class TestTabReader(unittest.TestCase):
 
     def test_reuse_variables(self):
         file1 = io.StringIO("\n".join("xd dbac"))
-        t1 = TabFormat().read_file(file1)
+        t1 = read_tab_file(file1)
 
         self.assertSequenceEqual(t1.domain['x'].values, 'abcd')
         np.testing.assert_almost_equal(t1.X.ravel(), [3, 1, 0, 2])
 
         file2 = io.StringIO("\n".join("xd hgacb"))
-        t2 = TabFormat().read_file(file2)
+        t2 = read_tab_file(file2)
 
         self.assertSequenceEqual(t2.domain['x'].values, 'abcdgh')
         np.testing.assert_almost_equal(t2.X.ravel(), [5, 4, 0, 2, 1])
@@ -128,3 +136,19 @@ class TestTabReader(unittest.TestCase):
             Replicate=['1', '2'],
         )
         self.assertEqual(data.domain[0].attributes, ATTRIBUTES)
+
+    def test_sheets(self):
+        file1 = io.StringIO("\n".join("xd dbac"))
+        reader = TabReader(file1)
+
+        self.assertEqual(reader.sheets, ())
+
+    def test_attributes_saving(self):
+        tempdir = tempfile.mkdtemp()
+        table = Table("iris")
+        self.assertEqual(table.attributes, {})
+        table.attributes[1] = "test"
+        table.save(path.join(tempdir, "out.tab"))
+        table = Table(path.join(tempdir, "out.tab"))
+        self.assertEqual(table.attributes[1], "test")
+        shutil.rmtree(tempdir)

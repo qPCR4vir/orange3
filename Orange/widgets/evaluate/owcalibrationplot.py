@@ -13,6 +13,7 @@ import Orange
 from Orange.widgets import widget, gui, settings
 from Orange.widgets.utils import colorpalette, colorbrewer
 from Orange.widgets.io import FileFormat
+from Orange.canvas import report
 
 
 Curve = namedtuple(
@@ -39,7 +40,7 @@ class OWCalibrationPlot(widget.OWWidget):
     selected_classifiers = settings.Setting([])
     display_rug = settings.Setting(True)
 
-    want_graph = True
+    graph_name = "plot"
 
     def __init__(self):
         super().__init__()
@@ -49,15 +50,15 @@ class OWCalibrationPlot(widget.OWWidget):
         self.colors = []
         self._curve_data = {}
 
-        box = gui.widgetBox(self.controlArea, "Plot")
-        tbox = gui.widgetBox(box, "Target Class")
+        box = gui.vBox(self.controlArea, "Plot")
+        tbox = gui.vBox(box, "Target Class")
         tbox.setFlat(True)
 
         self.target_cb = gui.comboBox(
             tbox, self, "target_index", callback=self._replot,
             contentsLength=8)
 
-        cbox = gui.widgetBox(box, "Classifier")
+        cbox = gui.vBox(box, "Classifier")
         cbox.setFlat(True)
 
         self.classifiers_list_box = gui.listBox(
@@ -79,11 +80,19 @@ class OWCalibrationPlot(widget.OWWidget):
         self.plotview.setCentralItem(self.plot)
 
         self.mainArea.layout().addWidget(self.plotview)
-        self.graphButton.clicked.connect(self.save_graph)
 
     def set_results(self, results):
         self.clear()
         self.results = results
+
+        if results is not None:
+            if results.data is None:
+                self.error(0, "Evaluation results require"
+                              " information on test data")
+                results = None
+            elif not results.data.domain.has_discrete_class:
+                self.error(0, "Need discrete class variable")
+                results = None
 
         if results is not None:
             self._initialize(results)
@@ -180,12 +189,14 @@ class OWCalibrationPlot(widget.OWWidget):
     def _on_display_rug_changed(self):
         self._replot()
 
-    def save_graph(self):
-        from Orange.widgets.data.owsave import OWSave
-
-        save_img = OWSave(data=self.plot,
-                          file_formats=FileFormat.img_writers)
-        save_img.exec_()
+    def send_report(self):
+        if self.results is None:
+            return
+        caption = report.list_legend(self.classifiers_list_box,
+                                     self.selected_classifiers)
+        self.report_items((("Target class", self.target_cb.currentText()),))
+        self.report_plot()
+        self.report_caption(caption)
 
 
 import numpy

@@ -8,11 +8,11 @@ import sys
 import gc
 import re
 import logging
+from logging.handlers import RotatingFileHandler
 import optparse
 import pickle
 import shlex
 import shutil
-import signal
 
 import pkg_resources
 
@@ -51,16 +51,19 @@ signal.signal(signal.SIGINT, signal.SIG_DFL)
 
 
 def fix_osx_10_9_private_font():
-    """Temporary fix for QTBUG-32789."""
-    from PyQt4.QtCore import QSysInfo, QT_VERSION
+    # Fix fonts on Os X (QTBUG 47206, 40833, 32789)
     if sys.platform == "darwin":
+        import platform
         try:
-            QFont.insertSubstitution(".Helvetica Neue DeskInterface",
-                                     "Helvetica Neue")
-            if QSysInfo.MacintoshVersion > QSysInfo.MV_10_8 and \
-                            QT_VERSION < 0x40806:
-                QFont.insertSubstitution(".Lucida Grande UI",
-                                         "Lucida Grande")
+            version = platform.mac_ver()[0]
+            version = float(version[:version.rfind(".")])
+            if version >= 10.11:  # El Capitan
+                QFont.insertSubstitution(".SF NS Text", "Helvetica Neue")
+            elif version >= 10.10:  # Yosemite
+                QFont.insertSubstitution(".Helvetica Neue DeskInterface",
+                                         "Helvetica Neue")
+            elif version >= 10.9:
+                QFont.insertSubstitution(".Lucida Grande UI", "Lucida Grande")
         except AttributeError:
             pass
 
@@ -74,10 +77,18 @@ def fix_win_pythonw_std_stream():
     """
     if sys.platform == "win32" and \
             os.path.basename(sys.executable) == "pythonw.exe":
-        if sys.stdout is not None and sys.stdout.fileno() < 0:
-            sys.stdout = open(os.devnull, "wb")
-        if sys.stdout is not None and sys.stderr.fileno() < 0:
-            sys.stderr = open(os.devnull, "wb")
+        if sys.stdout is None:
+            sys.stdout = open(os.devnull, "w")
+        if sys.stderr is None:
+            sys.stderr = open(os.devnull, "w")
+
+
+def make_sql_logger(level=logging.INFO):
+    sql_log = logging.getLogger('sql_log')
+    sql_log.setLevel(level)
+    handler = RotatingFileHandler(os.path.join(config.log_dir(), 'sql.log'),
+                                  maxBytes=1e7, backupCount=2)
+    sql_log.addHandler(handler)
 
 
 def main(argv=None):
@@ -140,6 +151,10 @@ def main(argv=None):
     root_level = min(levels[options.log_level], logging.INFO)
     rootlogger = logging.getLogger(canvas.__name__)
     rootlogger.setLevel(root_level)
+
+    # Initialize SQL query and execution time logger (in SqlTable)
+    sql_level = min(levels[options.log_level], logging.INFO)
+    make_sql_logger(sql_level)
 
     # Standard output stream handler at the requested level
     stream_hander = logging.StreamHandler()

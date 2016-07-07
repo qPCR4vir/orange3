@@ -34,7 +34,7 @@ _ItemSet = namedtuple("_ItemSet", ["key", "name", "title", "items"])
 
 class OWVennDiagram(widget.OWWidget):
     name = "Venn Diagram"
-    description = "A graphical visualization of an overlap of data instances " \
+    description = "A graphical visualization of the overlap of data instances " \
                   "from a collection of input data sets."
     icon = "icons/VennDiagram.svg"
 
@@ -49,9 +49,12 @@ class OWVennDiagram(widget.OWWidget):
     inputhints = settings.Setting({})
     #: Use identifier columns for instance matching
     useidentifiers = settings.Setting(True)
+    #: Output unique items (one output row for every unique instance `key`)
+    #: or preserve all duplicates in the output.
+    output_duplicates = settings.Setting(False)
     autocommit = settings.Setting(True)
 
-    want_graph = True
+    graph_name = "scene"
 
     def __init__(self):
         super().__init__()
@@ -68,8 +71,8 @@ class OWVennDiagram(widget.OWWidget):
         self.itemsets = OrderedDict()
 
         # GUI
-        box = gui.widgetBox(self.controlArea, "Info")
-        self.info = gui.widgetLabel(box, "No data on input\n")
+        box = gui.vBox(self.controlArea, "Info")
+        self.info = gui.widgetLabel(box, "No data on input.\n")
 
         self.identifiersBox = gui.radioButtonsInBox(
             self.controlArea, self, "useidentifiers", [],
@@ -79,7 +82,7 @@ class OWVennDiagram(widget.OWWidget):
         self.useequalityButton = gui.appendRadioButton(
             self.identifiersBox, "Use instance equality"
         )
-        rb = gui.appendRadioButton(
+        self.useidentifiersButton = rb = gui.appendRadioButton(
             self.identifiersBox, "Use identifiers"
         )
         self.inputsBox = gui.indentedBox(
@@ -88,8 +91,8 @@ class OWVennDiagram(widget.OWWidget):
         self.inputsBox.setEnabled(bool(self.useidentifiers))
 
         for i in range(5):
-            box = gui.widgetBox(self.inputsBox, "Data set #%i" % (i + 1),
-                                addSpace=False)
+            box = gui.vBox(self.inputsBox, "Data set #%i" % (i + 1),
+                           addSpace=False)
             box.setFlat(True)
             model = itemmodels.VariableListModel(parent=self)
             cb = QComboBox(
@@ -104,8 +107,10 @@ class OWVennDiagram(widget.OWWidget):
 
         gui.rubber(self.controlArea)
 
-        gui.auto_commit(self.controlArea, self, "autocommit",
-                        "Commit", "Auto commit")
+        box = gui.vBox(self.controlArea, "Output")
+        gui.checkBox(box, self, "output_duplicates", "Output duplicates",
+                     callback=lambda: self.commit())
+        gui.auto_commit(box, self, "autocommit", "Send Selection", "Send Automatically", box=False)
 
         # Main area view
         self.scene = QGraphicsScene()
@@ -126,7 +131,6 @@ class OWVennDiagram(widget.OWWidget):
                     max(self.controlArea.sizeHint().height(), 550))
 
         self._queue = []
-        self.graphButton.clicked.connect(self.save_graph)
 
     @check_sql_input
     def setData(self, data, key=None):
@@ -159,13 +163,18 @@ class OWVennDiagram(widget.OWWidget):
         domains = [input.table.domain for input in self.data.values()]
         samedomain = all(domain_eq(d1, d2) for d1, d2 in pairwise(domains))
 
-        self.useequalityButton.setEnabled(samedomain)
         self.samedomain = samedomain
 
         has_identifiers = all(source_attributes(input.table.domain)
                               for input in self.data.values())
+        has_any_identifiers = any(source_attributes(input.table.domain)
+                              for input in self.data.values())
+        self.useequalityButton.setEnabled(samedomain)
+        self.useidentifiersButton.setEnabled(
+            has_any_identifiers or len(self.data) == 0)
+        self.inputsBox.setEnabled(has_any_identifiers)
 
-        if not samedomain and not self.useidentifiers:
+        if not samedomain and has_any_identifiers and not self.useidentifiers:
             self.useidentifiers = 1
         elif samedomain and not has_identifiers:
             self.useidentifiers = 0
@@ -380,7 +389,14 @@ class OWVennDiagram(widget.OWWidget):
         colors = colorpalette.ColorPaletteHSV(n)
 
         for i, (key, item) in enumerate(self.itemsets.items()):
-            gr = VennSetItem(text=item.title, count=len(item.items))
+            count = len(set(item.items))
+            count_all = len(item.items)
+            if count != count_all:
+                fmt = '{} <i>(all: {})</i>'
+            else:
+                fmt = '{}'
+            counts = fmt.format(count, count_all)
+            gr = VennSetItem(text=item.title, informativeText=counts)
             color = colors[i]
             color.setAlpha(100)
             gr.setBrush(QBrush(color))
@@ -521,25 +537,25 @@ class OWVennDiagram(widget.OWWidget):
                     return _map[ComparableInstance(inst)]
 
             mask = numpy.array(mask, dtype=bool)
-            subset = Orange.data.Table(input.table.domain,
-                                       input.table[mask])
-            subset.ids = input.table.ids[mask]
+            subset = input.table[mask]
+
             if len(subset) == 0:
                 continue
 
             # add columns with source table id and set id
 
-            id_column = numpy.array([[instance_key(inst)] for inst in subset],
-                                    dtype=object)
-            source_names = numpy.array([[names[i]]] * len(subset),
-                                       dtype=object)
+            if not self.output_duplicates:
+                id_column = numpy.array([[instance_key(inst)] for inst in subset],
+                                        dtype=object)
+                source_names = numpy.array([[names[i]]] * len(subset),
+                                           dtype=object)
 
-            subset = append_column(subset, "M", source_var, source_names)
-            subset = append_column(subset, "M", item_id_var, id_column)
+                subset = append_column(subset, "M", source_var, source_names)
+                subset = append_column(subset, "M", item_id_var, id_column)
 
             selected_subsets.append(subset)
 
-        if selected_subsets:
+        if selected_subsets and not self.output_duplicates:
             data = table_concat(selected_subsets)
             # Get all variables which are not constant between the same
             # item set
@@ -551,6 +567,8 @@ class OWVennDiagram(widget.OWWidget):
             data = reshape_wide(data, varying, [item_id_var], [source_var])
             # remove the temporary item set id column
             data = drop_columns(data, [item_id_var])
+        elif selected_subsets:
+            data = table_concat(selected_subsets)
         else:
             data = None
 
@@ -560,12 +578,8 @@ class OWVennDiagram(widget.OWWidget):
         self._storeHints()
         return super().getSettings(self, *args, **kwargs)
 
-    def save_graph(self):
-        from Orange.widgets.data.owsave import OWSave
-
-        save_img = OWSave(data=self.scene,
-                          file_formats=FileFormat.img_writers)
-        save_img.exec_()
+    def send_report(self):
+        self.report_plot()
 
 
 def pairwise(iterable):
@@ -592,19 +606,23 @@ def domain_eq(d1, d2):
 
 # Comparing/hashing Orange.data.Instance across domains ignoring metas.
 class ComparableInstance:
-    __slots__ = ["inst", "domain"]
+    __slots__ = ["inst", "domain", "__hash"]
 
     def __init__(self, inst):
         self.inst = inst
         self.domain = inst.domain
+        self.__hash = hash((self.inst.x.data.tobytes(),
+                            self.inst.y.data.tobytes()))
 
     def __hash__(self):
-        return hash(self.inst.x.data.tobytes())
+        return self.__hash
 
     def __eq__(self, other):
         # XXX: comparing NaN with different payload
-        return (domain_eq(self.domain, other.domain)
-                and self.inst.x.data.tobytes() == other.inst.x.data.tobytes())
+        return (isinstance(other, ComparableInstance)
+                and domain_eq(self.domain, other.domain)
+                and self.inst.x.data.tobytes() == other.inst.x.data.tobytes()
+                and self.inst.y.data.tobytes() == other.inst.y.data.tobytes())
 
     def __iter__(self):
         return iter(self.inst)
@@ -934,11 +952,12 @@ def disjoint_set_label(i, n, simplify=False):
 
 
 class VennSetItem(QGraphicsPathItem):
-    def __init__(self, parent=None, text=None, count=None):
+    def __init__(self, parent=None, text="", informativeText=""):
         super(VennSetItem, self).__init__(parent)
+        # Plain text title (editable by the VennDiagram)
         self.text = text
-        self.count = count
-
+        # Extra informative text (possibly rich text)
+        self.informativeText = informativeText
 
 # TODO: Use palette's selected/highligted text / background colors to
 # indicate selection
@@ -1121,7 +1140,7 @@ class VennDiagram(QGraphicsWidget):
             text = GraphicsTextEdit(self)
             text.setFont(font)
             text.setDefaultTextColor(QColor("#333"))
-            text.setHtml(fmt(escape(item.text), item.count))
+            text.setHtml(fmt(escape(item.text), item.informativeText))
             text.adjustSize()
             text.editingStarted.connect(self._on_editingStarted)
             text.editingFinished.connect(self._on_editingFinished)
@@ -1277,7 +1296,8 @@ class VennDiagram(QGraphicsWidget):
             self.itemTextEdited.emit(index, text)
 
         item.setHtml(
-            self.TitleFormat.format(escape(text), self._items[index].count))
+            self.TitleFormat.format(
+                escape(text), self._items[index].informativeText))
         item.adjustSize()
 
     def _on_itemTextSizeChanged(self):

@@ -1,11 +1,13 @@
 from itertools import chain
-from Orange.widgets import gui
-from Orange.widgets.widget import OWWidget
-from Orange.widgets.settings import Setting
-from Orange.widgets.io import FileFormat
 
 from PyQt4.QtCore import *
 from PyQt4.QtGui import *
+
+from Orange.widgets import gui
+from Orange.widgets.widget import OWWidget
+from Orange.widgets.settings import Setting
+from Orange.widgets.utils.saveplot import save_plot
+from Orange.widgets.io import FileFormat
 
 DefDroppletBrush = QBrush(Qt.darkGray)
 
@@ -33,8 +35,10 @@ class GraphEdge:
         self.node1 = node1
         self.node2 = node2
         self.type = atype
-        node1.graph_add_edge(self)
-        node2.graph_add_edge(self)
+        if node1 is not None:
+            node1.graph_add_edge(self)
+        if node2 is not None:
+            node2.graph_add_edge(self)
 
 
 class GraphicsDroplet(QGraphicsEllipseItem):
@@ -96,7 +100,7 @@ class TextTreeNode(QGraphicsTextItem, GraphNode):
         font = self.font()
         font.setPointSize(10)
         self.setFont(font)
-        self.droplet = GraphicsDroplet(-5, 0, 10, 10, self, self.scene())
+        self.droplet = GraphicsDroplet(-5, 0, 10, 10, self)
         self.droplet.setPos(self.rect().center().x(), self.rect().height())
         self.document().contentsChanged.connect(self.update_contents)
         self.isOpen = True
@@ -357,7 +361,7 @@ class OWTreeViewer2D(OWWidget):
     _DEF_NODE_WIDTH = 24
     _DEF_NODE_HEIGHT = 20
 
-    want_graph = True
+    graph_name = "scene"
 
     def __init__(self):
         super().__init__()
@@ -365,40 +369,45 @@ class OWTreeViewer2D(OWWidget):
         self.root_node = None
         self.tree = None
 
-        box = gui.widgetBox(
-            self.controlArea, 'Tree size', addSpace=20,
+        box = gui.vBox(
+            self.controlArea, 'Tree', addSpace=20,
             sizePolicy=QSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed))
         self.info = gui.widgetLabel(box, 'No tree.')
 
-        layout = QGridLayout()
+        layout = QFormLayout()
         layout.setVerticalSpacing(20)
-        box = gui.widgetBox(self.controlArea, "Size", addSpace=True,
-                            orientation=layout)
-        layout.addWidget(QLabel("Zoom: "), 0, 0, Qt.AlignRight)
-        layout.addWidget(gui.hSlider(
-            box, self, 'zoom', minValue=1, maxValue=10, step=1,
-            createLabel=False, ticks=False, addToLayout=False, addSpace=False,
-            callback=self.toggle_zoom_slider), 0, 1)
-        layout.addWidget(QLabel("Width: "), 1, 0, Qt.AlignRight)
-        layout.addWidget(gui.hSlider(
-            box, self, 'max_node_width', minValue=50, maxValue=200, step=1,
-            createLabel=False, ticks=False, addToLayout=False, addSpace=False,
-            callback=self.toggle_node_size), 1, 1)
-        layout.addWidget(QLabel("Depth: "), 2, 0, Qt.AlignRight)
-        layout.addWidget(gui.comboBox(
-            box, self, 'max_tree_depth',
-            items=["Unlimited"] + ["{} levels".format(x) for x in range(2, 10)],
-            addToLayout=False,
-            sendSelectedValue=False, callback=self.toggle_tree_depth,
-            sizePolicy=QSizePolicy(QSizePolicy.MinimumExpanding,
-                                   QSizePolicy.Fixed)), 2, 1)
-        layout.addWidget(QLabel("Edge width: "), 3, 0, Qt.AlignRight)
-        layout.addWidget(gui.comboBox(
-            box, self, 'line_width_method', addToLayout=False,
-            items=['Fixed', 'Relative to root', 'Relative to parent'],
-            callback=self.toggle_line_width), 3, 1)
+        layout.setFieldGrowthPolicy(layout.ExpandingFieldsGrow)
+        box = self.display_box = \
+            gui.widgetBox(self.controlArea, "Display", addSpace=True,
+                          orientation=layout)
+        layout.addRow(
+            "Zoom: ",
+            gui.hSlider(box, self, 'zoom',
+                        minValue=1, maxValue=10, step=1, ticks=False,
+                        callback=self.toggle_zoom_slider,
+                        createLabel=False, addToLayout=False, addSpace=False))
+        layout.addRow(
+            "Width: ",
+            gui.hSlider(box, self, 'max_node_width',
+                        minValue=50, maxValue=200, step=1, ticks=False,
+                        callback=self.toggle_node_size,
+                        createLabel=False, addToLayout=False, addSpace=False))
+        policy = QSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Fixed)
+        layout.addRow(
+            "Depth: ",
+            gui.comboBox(box, self, 'max_tree_depth',
+                         items=["Unlimited"] + [
+                             "{} levels".format(x) for x in range(2, 10)],
+                         addToLayout=False, sendSelectedValue=False,
+                         callback=self.toggle_tree_depth, sizePolicy=policy))
+        layout.addRow(
+            "Edge width: ",
+            gui.comboBox(box, self, 'line_width_method',
+                         items=['Fixed', 'Relative to root',
+                                'Relative to parent'],
+                         addToLayout=False,
+                         callback=self.toggle_line_width, sizePolicy=policy))
         self.resize(800, 500)
-        self.graphButton.clicked.connect(self.save_graph)
 
     def send_report(self):
         from PyQt4.QtSvg import QSvgGenerator
@@ -539,10 +548,6 @@ class OWTreeViewer2D(OWWidget):
         # else None)
 
     def save_graph(self):
-        from Orange.widgets.data.owsave import OWSave
-
-        save_img = OWSave(data={'scene': self.scene, 'tree': self.tree},
-                          file_formats=dict(chain(
-                              FileFormat.img_writers.items(),
-                              FileFormat.graph_writers.items())))
-        save_img.exec_()
+        save_plot(data=dict(scene=self.scene, tree=self.tree),
+                  file_formats=dict(chain(FileFormat.img_writers.items(),
+                                          FileFormat.graph_writers.items())))

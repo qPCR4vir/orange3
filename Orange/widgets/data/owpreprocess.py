@@ -1,6 +1,8 @@
 import sys
 import bisect
 import contextlib
+import warnings
+from collections import OrderedDict
 import pkg_resources
 
 import numpy
@@ -10,7 +12,7 @@ from PyQt4.QtGui import (
     QVBoxLayout, QHBoxLayout, QFormLayout, QSpacerItem, QSizePolicy,
     QCursor, QIcon,  QStandardItemModel, QStandardItem, QStyle,
     QStylePainter, QStyleOptionFrame, QPixmap,
-    QApplication, QDrag
+    QApplication, QDrag, QLabel
 )
 from PyQt4 import QtGui
 from PyQt4.QtCore import (
@@ -22,11 +24,11 @@ from PyQt4.QtCore import pyqtSignal as Signal, pyqtSlot as Slot
 import Orange.data
 from Orange import preprocess
 from Orange.statistics import distribution
-from Orange.preprocess import Continuize, Randomize as Random
+from Orange.preprocess import Continuize, ProjectPCA, \
+    ProjectCUR, Randomize as Random
 from Orange.widgets import widget, gui, settings
 from Orange.widgets.utils.overlay import OverlayWidget
 from Orange.widgets.utils.sql import check_sql_input
-from .owimpute import RandomTransform
 
 
 @contextlib.contextmanager
@@ -133,17 +135,20 @@ class DiscretizeEditor(BaseEditor):
         group.buttonClicked.connect(self.__on_buttonClicked)
 
         self.__slbox = slbox = QGroupBox(
-            title="Number of intervals (for equal width/frequency",
+            title="Number of intervals (for equal width/frequency)",
             flat=True
         )
-        slbox.setLayout(QVBoxLayout())
+        slbox.setLayout(QHBoxLayout())
         self.__slider = slider = QSlider(
             orientation=Qt.Horizontal,
             minimum=2, maximum=10, value=self.__nintervals,
             enabled=self.__method in [self.EqualFreq, self.EqualWidth],
+            pageStep=1, tickPosition=QSlider.TicksBelow
         )
         slider.valueChanged.connect(self.__on_valueChanged)
         slbox.layout().addWidget(slider)
+        self.__slabel = slabel = QLabel()
+        slbox.layout().addWidget(slabel)
 
         container = QHBoxLayout()
         container.setContentsMargins(13, 0, 0, 0)
@@ -177,6 +182,7 @@ class DiscretizeEditor(BaseEditor):
             # changed programmatically (this)
             with blocked(self.__slider):
                 self.__slider.setValue(n)
+                self.__slabel.setText(str(self.__slider.value()))
             self.changed.emit()
 
     def setParameters(self, params):
@@ -204,6 +210,7 @@ class DiscretizeEditor(BaseEditor):
         self.__nintervals = self.__slider.value()
         self.changed.emit()
         self.edited.emit()
+        self.__slabel.setText(str(self.__slider.value()))
 
     @staticmethod
     def createinstance(params):
@@ -219,15 +226,20 @@ class DiscretizeEditor(BaseEditor):
         resolved.update(params)
         return preprocess.Discretize(method(**params), remove_const=False)
 
+    def __repr__(self):
+        n_int = ", Number of intervals: {}".format(self.__nintervals) \
+            if self.__method in [self.EqualFreq, self.EqualWidth] else ""
+        return "{}{}".format(self.Names[self.__method], n_int)
+
 
 class ContinuizeEditor(BaseEditor):
-    Continuizers = [
-        ("Most frequent is base", Continuize.FrequentAsBase),
-        ("One attribute per value", Continuize.Indicators),
-        ("Remove multinomial attributes", Continuize.RemoveMultinomial),
-        ("Remove all discrete attributes", Continuize.Remove),
-        ("Treat as ordinal", Continuize.AsOrdinal),
-        ("Divide by number of values", Continuize.AsNormalizedOrdinal)]
+    Continuizers = OrderedDict({
+        Continuize.FrequentAsBase: "Most frequent is base",
+        Continuize.Indicators: "One attribute per value",
+        Continuize.RemoveMultinomial: "Remove multinomial attributes",
+        Continuize.Remove: "Remove all discrete attributes",
+        Continuize.AsOrdinal: "Treat as ordinal",
+        Continuize.AsNormalizedOrdinal: "Divide by number of values"})
 
     def __init__(self, parent=None, **kwargs):
         super().__init__(parent, **kwargs)
@@ -237,7 +249,7 @@ class ContinuizeEditor(BaseEditor):
         self.__group = group = QButtonGroup(exclusive=True)
         group.buttonClicked.connect(self.__on_buttonClicked)
 
-        for text, treatment in ContinuizeEditor.Continuizers:
+        for treatment, text in ContinuizeEditor.Continuizers.items():
             rb = QRadioButton(
                 text=text,
                 checked=self.__treatment == treatment)
@@ -274,24 +286,8 @@ class ContinuizeEditor(BaseEditor):
         treatment = params.pop("multinomial_treatment", Continuize.Indicators)
         return Continuize(multinomial_treatment=treatment)
 
-
-class _ImputeRandom:
-
-    class ReplaceUnknownsSampleRandom(RandomTransform):
-        def transform(self, column):
-            mask = numpy.isnan(column)
-            c = column[mask]
-            if not c.size:
-                return column
-            else:
-                c = super().transform(c)
-                column = numpy.array(column)
-                column[mask] = c
-                return column
-
-    def __call__(self, data, variable):
-        dist = distribution.get_distribution(data, variable)
-        return variable.copy(compute_value=self.ReplaceUnknownsSampleRandom(variable, dist))
+    def __repr__(self):
+        return self.Continuizers[self.__treatment]
 
 
 class _RemoveNaNRows(preprocess.preprocess.Preprocess):
@@ -310,7 +306,7 @@ class ImputeEditor(BaseEditor):
 #         Constant: (None, {"value": 0})
         Average: (preprocess.impute.Average(), {}),
 #         Model: (preprocess.impute.Model, {}),
-        Random: (_ImputeRandom(), {}),
+        Random: (preprocess.impute.Random(), {}),
         DropRows: (None, {})
     }
     Names = {
@@ -375,6 +371,9 @@ class ImputeEditor(BaseEditor):
             defaults.update(params)
             return preprocess.Impute(method=method)
 
+    def __repr__(self):
+        return self.Names[self.__method]
+
 
 class UnivariateFeatureSelect(QWidget):
     changed = Signal()
@@ -406,7 +405,7 @@ class UnivariateFeatureSelect(QWidget):
         self.__spins = {}
 
         form = QFormLayout()
-        fixedrb = QRadioButton("Fixed", checked=True)
+        fixedrb = QRadioButton("Fixed:", checked=True)
         group.addButton(fixedrb, UnivariateFeatureSelect.Fixed)
         kspin = QSpinBox(
             minimum=1, value=self.__k,
@@ -417,7 +416,7 @@ class UnivariateFeatureSelect(QWidget):
         self.__spins[UnivariateFeatureSelect.Fixed] = kspin
         form.addRow(fixedrb, kspin)
 
-        percrb = QRadioButton("Percentile")
+        percrb = QRadioButton("Percentile:")
         group.addButton(percrb, UnivariateFeatureSelect.Percentile)
         pspin = QDoubleSpinBox(
             minimum=0.0, maximum=100.0, singleStep=0.5,
@@ -509,6 +508,8 @@ class FeatureSelectEditor(BaseEditor):
         ("Information Gain", preprocess.score.InfoGain),
         ("Gain ratio", preprocess.score.GainRatio),
         ("Gini index", preprocess.score.Gini),
+        ("ReliefF", preprocess.score.ReliefF),
+        ("Fast Correlation Based Filter", preprocess.score.FCBF)
     ]
 
     def __init__(self, parent=None):
@@ -521,9 +522,11 @@ class FeatureSelectEditor(BaseEditor):
 
         self.__uni_fs = UnivariateFeatureSelect()
         self.__uni_fs.setItems(
-            [{"text": "Information gain", "tooltip": ""},
-             {"text": "Gain ratio"},
-             {"text": "Gini index"}
+            [{"text": "Information Gain", "tooltip": ""},
+             {"text": "Gain Ratio"},
+             {"text": "Gini Index"},
+             {"text": "ReliefF"},
+             {"text": "Fast Correlation Based Filter"}
             ]
         )
         self.layout().addWidget(self.__uni_fs)
@@ -549,9 +552,116 @@ class FeatureSelectEditor(BaseEditor):
             # TODO: implement top percentile selection
             raise NotImplementedError
 
+    def __repr__(self):
+        params = self.__uni_fs.parameters()
+        return "Score: {}, Strategy (Fixed): {}".format(
+            self.MEASURES[params["score"]][0], params["k"])
+
 # TODO: Model based FS (random forest variable importance, ...), RFE
 # Unsupervised (min variance, constant, ...)??
 
+class RandomFeatureSelectEditor(BaseEditor):
+    #: Strategy
+    Fixed, Percentage = 1, 2
+
+    def __init__(self, parent=None, **kwargs):
+        super().__init__(parent, **kwargs)
+        self.setLayout(QVBoxLayout())
+
+        self.__strategy = RandomFeatureSelectEditor.Fixed
+        self.__k = 10
+        self.__p = 75.0
+
+        box = QGroupBox(title="Strategy", flat=True)
+        self.__group = group = QButtonGroup(self, exclusive=True)
+        self.__spins = {}
+
+        form = QFormLayout()
+        fixedrb = QRadioButton("Fixed", checked=True)
+        group.addButton(fixedrb, RandomFeatureSelectEditor.Fixed)
+        kspin = QSpinBox(
+            minimum=1, value=self.__k,
+            enabled=self.__strategy == RandomFeatureSelectEditor.Fixed
+        )
+        kspin.valueChanged[int].connect(self.setK)
+        kspin.editingFinished.connect(self.edited)
+        self.__spins[RandomFeatureSelectEditor.Fixed] = kspin
+        form.addRow(fixedrb, kspin)
+
+        percrb = QRadioButton("Percentage")
+        group.addButton(percrb, RandomFeatureSelectEditor.Percentage)
+        pspin = QDoubleSpinBox(
+            minimum=0.0, maximum=100.0, singleStep=0.5,
+            value=self.__p, suffix="%",
+            enabled=self.__strategy == RandomFeatureSelectEditor.Percentage
+        )
+        pspin.valueChanged[float].connect(self.setP)
+        pspin.editingFinished.connect(self.edited)
+        self.__spins[RandomFeatureSelectEditor.Percentage] = pspin
+        form.addRow(percrb, pspin)
+
+        self.__group.buttonClicked.connect(self.__on_buttonClicked)
+        box.setLayout(form)
+        self.layout().addWidget(box)
+
+    def setStrategy(self, strategy):
+        if self.__strategy != strategy:
+            self.__strategy = strategy
+            b = self.__group.button(strategy)
+            b.setChecked(True)
+            for st, rb in self.__spins.items():
+                rb.setEnabled(st == strategy)
+            self.changed.emit()
+
+    def setK(self, k):
+        if self.__k != k:
+            self.__k = k
+            spin = self.__spins[RandomFeatureSelectEditor.Fixed]
+            spin.setValue(k)
+            if self.__strategy == RandomFeatureSelectEditor.Fixed:
+                self.changed.emit()
+
+    def setP(self, p):
+        if self.__p != p:
+            self.__p = p
+            spin = self.__spins[RandomFeatureSelectEditor.Percentage]
+            spin.setValue(p)
+            if self.__strategy == RandomFeatureSelectEditor.Percentage:
+                self.changed.emit()
+
+    def __on_buttonClicked(self):
+        strategy = self.__group.checkedId()
+        self.setStrategy(strategy)
+        self.edited.emit()
+
+    def setParameters(self, params):
+        strategy = params.get("strategy", RandomFeatureSelectEditor.Fixed)
+        self.setStrategy(strategy)
+        if strategy == RandomFeatureSelectEditor.Fixed:
+            self.setK(params.get("k", 10))
+        else:
+            self.setP(params.get("p", 75.0))
+
+    def parameters(self):
+        strategy = self.__strategy
+        p = self.__p
+        k = self.__k
+
+        return {"strategy": strategy, "p": p, "k": k}
+
+    @staticmethod
+    def createinstance(params):
+        params = dict(params)
+        strategy = params.get("strategy", RandomFeatureSelectEditor.Fixed)
+        k = params.get("k", 10)
+        p = params.get("p", 75.0)
+        if strategy == RandomFeatureSelectEditor.Fixed:
+            return preprocess.fss.SelectRandomFeatures(k=k)
+        elif strategy == RandomFeatureSelectEditor.Percentage:
+            return preprocess.fss.SelectRandomFeatures(k=p/100)
+        else:
+            # further implementations
+            raise NotImplementedError
 
 class _Scaling(preprocess.preprocess.Preprocess):
     """
@@ -631,15 +741,15 @@ class Scale(BaseEditor):
 
         form = QFormLayout()
         self.__centercb = QComboBox()
-        self.__centercb.addItems(["No centering", "Center by mean",
-                                  "Center by median"])
+        self.__centercb.addItems(["No Centering", "Center by Mean",
+                                  "Center by Median"])
 
         self.__scalecb = QComboBox()
-        self.__scalecb.addItems(["No scaling", "Scale by std",
+        self.__scalecb.addItems(["No scaling", "Scale by SD",
                                  "Scale by span"])
 
-        form.addRow("Center", self.__centercb)
-        form.addRow("Scale", self.__scalecb)
+        form.addRow("Center:", self.__centercb)
+        form.addRow("Scale:", self.__scalecb)
         self.layout().addLayout(form)
         self.__centercb.currentIndexChanged.connect(self.changed)
         self.__scalecb.currentIndexChanged.connect(self.changed)
@@ -681,6 +791,10 @@ class Scale(BaseEditor):
 
         return _Scaling(center=center, scale=scale)
 
+    def __repr__(self):
+        return "{}, {}".format(self.__centercb.currentText(),
+                               self.__scalecb.currentText())
+
 
 class _Randomize(preprocess.preprocess.Preprocess):
     """
@@ -708,7 +822,7 @@ class Randomize(BaseEditor):
                                       "Features",
                                       "Meta data"])
 
-        form.addRow("Randomize", self.__rand_type_cb)
+        form.addRow("Randomize:", self.__rand_type_cb)
         self.layout().addLayout(form)
         self.__rand_type_cb.currentIndexChanged.connect(self.changed)
         self.__rand_type_cb.activated.connect(self.edited)
@@ -724,6 +838,99 @@ class Randomize(BaseEditor):
     def createinstance(params):
         rand_type = params.get("rand_type", Randomize.RandomizeClasses)
         return _Randomize(rand_type=rand_type)
+
+    def __repr__(self):
+        return self.__rand_type_cb.currentText()
+
+
+class PCA(BaseEditor):
+
+    def __init__(self, parent=None, **kwargs):
+        super().__init__(parent, **kwargs)
+        self.setLayout(QVBoxLayout())
+
+        self.n_components = 10
+
+        form = QFormLayout()
+        self.cspin = QSpinBox(minimum=1, value=self.n_components)
+        self.cspin.valueChanged[int].connect(self.setC)
+        self.cspin.editingFinished.connect(self.edited)
+
+        form.addRow("Components:", self.cspin)
+        self.layout().addLayout(form)
+
+    def setParameters(self, params):
+        self.n_components = params.get("n_components", 10)
+
+    def parameters(self):
+        return {"n_components": self.n_components}
+
+    def setC(self, n_components):
+        if self.n_components != n_components:
+            self.n_components = n_components
+            self.cspin.setValue(n_components)
+            self.changed.emit()
+
+    @staticmethod
+    def createinstance(params):
+        n_components = params.get("n_components", 10)
+        return ProjectPCA(n_components=n_components)
+
+    def __repr__(self):
+        return "Components: {}".format(self.cspin.value())
+
+
+class CUR(BaseEditor):
+
+    def __init__(self, parent=None, **kwargs):
+        super().__init__(parent, **kwargs)
+        self.setLayout(QVBoxLayout())
+
+        self.rank = 10
+        self.max_error = 1
+
+        form = QFormLayout()
+        self.rspin = QSpinBox(minimum=2, value=self.rank)
+        self.rspin.valueChanged[int].connect(self.setR)
+        self.rspin.editingFinished.connect(self.edited)
+        self.espin = QDoubleSpinBox(
+            minimum=0.1, maximum=100.0, singleStep=0.1,
+            value=self.max_error)
+        self.espin.valueChanged[float].connect(self.setE)
+        self.espin.editingFinished.connect(self.edited)
+
+        form.addRow("Rank:", self.rspin)
+        form.addRow("Relative error:", self.espin)
+        self.layout().addLayout(form)
+
+    def setParameters(self, params):
+        self.setR(params.get("rank", 10))
+        self.setE(params.get("max_error", 1))
+
+    def parameters(self):
+        return {"rank": self.rank, "max_error": self.max_error}
+
+    def setR(self, rank):
+        if self.rank != rank:
+            self.rank = rank
+            self.rspin.setValue(rank)
+            self.changed.emit()
+
+    def setE(self, max_error):
+        if self.max_error != max_error:
+            self.max_error = max_error
+            self.espin.setValue(max_error)
+            self.changed.emit()
+
+    @staticmethod
+    def createinstance(params):
+        rank = params.get("rank", 10)
+        max_error = params.get("max_error", 1)
+        return ProjectCUR(rank=rank, max_error=max_error)
+
+    def __repr__(self):
+        return "Rank: {}, Relative error: {}".format(self.rspin.value(),
+                                                     self.espin.value())
 
 
 # This is intended for future improvements.
@@ -790,6 +997,13 @@ PREPROCESSORS = [
         FeatureSelectEditor
     ),
     PreprocessAction(
+        "Random Feature Selection", "orange.preprocess.randomfss",
+        "Random Feature Selection",
+        Description("Select Random Features",
+                    icon_path("SelectColumnsRandom.svg")),
+        RandomFeatureSelectEditor
+    ),
+    PreprocessAction(
         "Normalize", "orange.preprocess.scale", "Scaling",
         Description("Normalize Features",
                     icon_path("Normalize.svg")),
@@ -800,8 +1014,21 @@ PREPROCESSORS = [
         Description("Randomize",
                     icon_path("Random.svg")),
         Randomize
+    ),
+    PreprocessAction(
+        "PCA", "orange.preprocess.pca", "PCA",
+        Description("Principal Component Analysis",
+                    icon_path("PCA.svg")),
+        PCA
+    ),
+    PreprocessAction(
+        "CUR", "orange.preprocess.cur", "CUR",
+        Description("CUR Matrix Decomposition",
+                    icon_path("SelectColumns.svg")),
+        CUR
     )
 ]
+
 
 # TODO: Extend with entry points here
 # PREPROCESSORS += iter_entry_points("Orange.widgets.data.owpreprocess")
@@ -820,6 +1047,126 @@ PREPROCESSORS = [
 # * the source (of drag/drop) is an item model displayed in a list
 #   view (source list).
 # * the drag/drop is controlled by the controller/adapter,
+
+
+def list_model_move_row_helper(model, parent, src, dst):
+    assert src != dst and src != dst - 1
+    data = model.itemData(model.index(src, 0, parent))
+    removed = model.removeRow(src, parent)
+    if not removed:
+        return False
+
+    realdst = dst - 1 if dst > src else dst
+    inserted = model.insertRow(realdst, parent)
+    if not inserted:
+        return False
+
+    dataset = model.setItemData(model.index(realdst, 0, parent), data)
+
+    return removed and inserted and dataset
+
+
+def list_model_move_rows_helper(model, parent, src, count, dst):
+    assert not (src <= dst < src + count + 1)
+    rowdata = [model.itemData(model.index(src + i, 0, parent))
+               for i in range(count)]
+    removed = model.removeRows(src, count, parent)
+    if not removed:
+        return False
+
+    realdst = dst - count if dst > src else dst
+    inserted = model.insertRows(realdst, count, parent)
+    if not inserted:
+        return False
+
+    setdata = True
+    for i, data in enumerate(rowdata):
+        didset = model.setItemData(model.index(realdst + i, 0, parent), data)
+        setdata = setdata and didset
+    return setdata
+
+
+class StandardItemModel(QtGui.QStandardItemModel):
+    """
+    A QStandardItemModel improving support for internal row moves.
+
+    The QStandardItemModel is missing support for explicitly moving
+    rows internally. Therefore to move a row it is first removed
+    reinserted as an empty row and it's data repopulated.
+    This triggers rowsRemoved/rowsInserted and dataChanged signals.
+    If an observer is monitoring the model state it would see all the model
+    changes. By using moveRow[s] only one `rowsMoved` signal is emitted
+    coalescing all the updates.
+
+    .. note:: The semantics follow Qt5's QAbstractItemModel.moveRow[s]
+
+    """
+
+    def moveRow(self, sourceParent, sourceRow, destParent, destRow):
+        """
+        Move sourceRow from sourceParent to destinationRow under destParent.
+
+        Returns True if the row was successfully moved; otherwise
+        returns false.
+
+        .. note:: Only moves within the same parent are currently supported
+
+        """
+        if not sourceParent == destParent:
+            return False
+
+        if not self.beginMoveRows(sourceParent, sourceRow, sourceRow,
+                                  destParent, destRow):
+            return False
+
+        # block so rowsRemoved/Inserted and dataChanged signals
+        # are not emitted during the move. Instead the rowsMoved
+        # signal will be emitted from self.endMoveRows().
+        # I am mostly sure this is safe (a possible problem would be if the
+        # base class itself would connect to the rowsInserted, ... to monitor
+        # ensure internal invariants)
+        with blocked(self):
+            didmove = list_model_move_row_helper(
+                self, sourceParent, sourceRow, destRow)
+        self.endMoveRows()
+
+        if not didmove:
+            warnings.warn(
+                "`moveRow` did not succeed! Data model might be "
+                "in an inconsistent state.",
+                RuntimeWarning)
+        return didmove
+
+    def moveRows(self, sourceParent, sourceRow, count,
+                 destParent, destRow):
+        """
+        Move count rows starting with the given sourceRow under parent
+        sourceParent to row destRow under parent destParent.
+
+        Return true if the rows were successfully moved; otherwise
+        returns false.
+
+        .. note:: Only moves within the same parent are currently supported
+
+        """
+        if not self.beginMoveRows(sourceParent, sourceRow, sourceRow + count,
+                                  destParent, destRow):
+            return False
+
+        # block so rowsRemoved/Inserted and dataChanged signals
+        # are not emitted during the move. Instead the rowsMoved
+        # signal will be emitted from self.endMoveRows().
+        with blocked(self):
+            didmove = list_model_move_rows_helper(
+                self, sourceParent, sourceRow, count, destRow)
+        self.endMoveRows()
+
+        if not didmove:
+            warnings.warn(
+                "`moveRows` did not succeed! Data model might be "
+                "in an inconsistent state.",
+                RuntimeWarning)
+        return didmove
 
 #: Qt.ItemRole holding the PreprocessAction instance
 DescriptionRole = Qt.UserRole
@@ -998,7 +1345,7 @@ class Controller(QObject):
         model.removeRows(row, 1, QModelIndex())
 
     def _widgetMoved(self, from_, to):
-        # The widget in the view were already swaped, so
+        # The widget in the view were already swapped, so
         # we must disconnect from the model when moving the rows.
         # It would be better if this class would also filter and
         # handle internal widget moves.
@@ -1008,13 +1355,16 @@ class Controller(QObject):
             model.moveRow
         except AttributeError:
             data = model.itemData(model.index(from_, 0))
-            model.removeRow(from_, QModelIndex())
-            model.insertRow(to, QModelIndex())
-
+            removed = model.removeRow(from_, QModelIndex())
+            inserted = model.insertRow(to, QModelIndex())
             model.setItemData(model.index(to, 0), data)
+            assert removed and inserted
             assert model.rowCount() == len(self.view.widgets())
         else:
-            model.moveRow(QModelIndex(), from_, QModelIndex(), to)
+            if to > from_:
+                to = to + 1
+            didmove = model.moveRow(QModelIndex(), from_, QModelIndex(), to)
+            assert didmove
         finally:
             self.__connect(model)
 
@@ -1120,7 +1470,7 @@ class SequenceFlow(QWidget):
         def paintEvent(self, event):
             painter = QStylePainter(self)
             opt = QStyleOptionFrame()
-            opt.init(self)
+            opt.initFrom(self)
             painter.drawPrimitive(QStyle.PE_FrameDockWidget, opt)
             painter.end()
 
@@ -1134,8 +1484,9 @@ class SequenceFlow(QWidget):
 
         def focusOutEvent(self, event):
             event.accept()
-            self.__focusframe.deleteLater()
-            self.__focusframe = None
+            if self.__focusframe is not None:
+                self.__focusframe.deleteLater()
+                self.__focusframe = None
             self.__deleteaction.setEnabled(False)
 
         def closeEvent(self, event):
@@ -1279,13 +1630,15 @@ class SequenceFlow(QWidget):
             # Remove the drop indicator spacer item before re-inserting
             # the frame
             self.__setDropIndicatorAt(None)
-            if oldindex != index:
-                layout.insertWidget(index, frame)
-                if index > oldindex:
-                    self.widgetMoved.emit(oldindex, index - 1)
-                else:
-                    self.widgetMoved.emit(oldindex, index)
 
+            if index > oldindex:
+                index = index - 1
+
+            if index != oldindex:
+                item = layout.takeAt(oldindex)
+                assert item.widget() is frame
+                layout.insertWidget(index, frame)
+                self.widgetMoved.emit(oldindex, index)
                 event.accept()
 
             self.__dragstart = None, None, None
@@ -1376,7 +1729,7 @@ class SequenceFlow(QWidget):
         if hotSpot is not None:
             drag.setHotSpot(hotSpot)
         mime = QMimeData()
-        mime.setData("application/x-internal-move", "")
+        mime.setData("application/x-internal-move", b"")
         drag.setMimeData(mime)
         return drag.exec_(Qt.MoveAction)
 
@@ -1434,13 +1787,13 @@ class OWPreprocess(widget.OWWidget):
             index = indexlist[0]
             qname = index.data(DescriptionRole).qualname
             m = QMimeData()
-            m.setData("application/x-qwidget-ref", qname)
+            m.setData("application/x-qwidget-ref", qname.encode("utf-8"))
             return m
         # TODO: Fix this (subclass even if just to pass a function
         # for mimeData delegate)
         self.preprocessors.mimeData = mimeData
 
-        box = gui.widgetBox(self.controlArea, "Preprocessors")
+        box = gui.vBox(self.controlArea, "Preprocessors")
 
         self.preprocessorsView = view = QListView(
             selectionMode=QListView.SingleSelection,
@@ -1478,8 +1831,8 @@ class OWPreprocess(widget.OWWidget):
         self.mainArea.layout().addWidget(self.scroll_area)
         self.flow_view.installEventFilter(self)
 
-        box = gui.widgetBox(self.controlArea, "Output")
-        gui.auto_commit(box, self, "autocommit", "Commit", box=False)
+        box = gui.vBox(self.controlArea, "Output")
+        gui.auto_commit(box, self, "autocommit", "Send", box=False)
 
         self._initialize()
 
@@ -1516,7 +1869,7 @@ class OWPreprocess(widget.OWWidget):
         """Load a preprocessor list from a dict."""
         name = saved.get("name", "")
         preprocessors = saved.get("preprocessors", [])
-        model = QStandardItemModel()
+        model = StandardItemModel()
 
         def dropMimeData(data, action, row, column, parent):
             if data.hasFormat("application/x-qwidget-ref") and \
@@ -1569,6 +1922,7 @@ class OWPreprocess(widget.OWWidget):
             self.preprocessormodel.dataChanged.disconnect(self.__on_modelchanged)
             self.preprocessormodel.rowsInserted.disconnect(self.__on_modelchanged)
             self.preprocessormodel.rowsRemoved.disconnect(self.__on_modelchanged)
+            self.preprocessormodel.rowsMoved.disconnect(self.__on_modelchanged)
             self.preprocessormodel.deleteLater()
 
         self.preprocessormodel = ppmodel
@@ -1577,15 +1931,21 @@ class OWPreprocess(widget.OWWidget):
             self.preprocessormodel.dataChanged.connect(self.__on_modelchanged)
             self.preprocessormodel.rowsInserted.connect(self.__on_modelchanged)
             self.preprocessormodel.rowsRemoved.connect(self.__on_modelchanged)
+            self.preprocessormodel.rowsMoved.connect(self.__on_modelchanged)
 
-    def __on_modelchanged(self):
-        if self.preprocessormodel is None or self.preprocessormodel.rowCount() == 0:
+        self.__update_overlay()
+
+    def __update_overlay(self):
+        if self.preprocessormodel is None or \
+                self.preprocessormodel.rowCount() == 0:
             self.overlay.setWidget(self.flow_view)
             self.overlay.show()
         else:
             self.overlay.setWidget(None)
             self.overlay.hide()
 
+    def __on_modelchanged(self):
+        self.__update_overlay()
         self.commit()
 
     @check_sql_input
@@ -1624,7 +1984,10 @@ class OWPreprocess(widget.OWWidget):
             return preprocess.preprocess.PreprocessorList(plist)
 
     def apply(self):
+        # Sync the model into storedsettings on every apply.
+        self.storeSpecificSettings()
         preprocessor = self.buildpreproc()
+
         if self.data is not None:
             self.error(0)
             try:
@@ -1639,8 +2002,6 @@ class OWPreprocess(widget.OWWidget):
         self.send("Preprocessed Data", data)
 
     def commit(self):
-        # Sync the model into storedsettings on every change commit.
-        self.storeSpecificSettings()
         if not self._invalidated:
             self._invalidated = True
             QApplication.postEvent(self, QEvent(QEvent.User))
@@ -1686,6 +2047,12 @@ class OWPreprocess(widget.OWWidget):
         sh = super().sizeHint()
         return sh.expandedTo(QSize(sh.width(), 500))
 
+    def send_report(self):
+        pp = [(self.controler.model().index(i, 0).data(Qt.DisplayRole), w)
+              for i, w in enumerate(self.controler.view.widgets())]
+        if len(pp):
+            self.report_items("Settings", pp)
+
 
 def test_main(argv=sys.argv):
     argv = list(argv)
@@ -1701,9 +2068,11 @@ def test_main(argv=sys.argv):
     w.show()
     w.raise_()
     r = app.exec_()
+    w.set_data(None)
     w.saveSettings()
     w.onDeleteWidget()
     return r
 
 if __name__ == "__main__":
     sys.exit(test_main())
+

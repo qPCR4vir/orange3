@@ -1,4 +1,5 @@
 from PyQt4 import QtGui
+from PyQt4.QtCore import Qt
 
 import Orange.data
 from Orange.statistics import distribution
@@ -14,7 +15,6 @@ class OWContinuize(widget.OWWidget):
     description = ("Transform discrete attributes into continuous and, " +
                    "optionally, normalize the continuous values.")
     icon = "icons/Continuize.svg"
-    author = "Martin Frlin"
     category = "Data"
     keywords = ["data", "continuize"]
 
@@ -22,6 +22,7 @@ class OWContinuize(widget.OWWidget):
     outputs = [("Data", Orange.data.Table)]
 
     want_main_area = False
+    buttons_area_orientation = Qt.Vertical
     resizing_enabled = False
 
     multinomial_treatment = Setting(0)
@@ -34,7 +35,7 @@ class OWContinuize(widget.OWWidget):
     autosend = Setting(True)
 
     multinomial_treats = (
-        ("Target or First value as base", Continuize.FirstAsBase),
+        ("Target or first value as base", Continuize.FirstAsBase),
         ("Most frequent value as base", Continuize.FrequentAsBase),
         ("One attribute per value", Continuize.Indicators),
         ("Ignore multinomial attributes", Continuize.RemoveMultinomial),
@@ -54,37 +55,37 @@ class OWContinuize(widget.OWWidget):
         ("One class per value", Continuize.Indicators),
     )
 
-    value_ranges = ["from -1 to 1", "from 0 to 1"]
+    value_ranges = ["From -1 to 1", "From 0 to 1"]
 
     def __init__(self):
         super().__init__()
 
-        box = gui.widgetBox(self.controlArea, "Multinomial attributes")
+        box = gui.vBox(self.controlArea, "Multinomial Attributes")
         gui.radioButtonsInBox(
             box, self, "multinomial_treatment",
             btnLabels=[x[0] for x in self.multinomial_treats],
             callback=self.settings_changed)
 
-        box = gui.widgetBox(self.controlArea, "Continuous attributes")
+        box = gui.vBox(self.controlArea, "Continuous Attributes")
         gui.radioButtonsInBox(
             box, self, "continuous_treatment",
             btnLabels=[x[0] for x in self.continuous_treats],
             callback=self.settings_changed)
 
-        box = gui.widgetBox(self.controlArea, "Discrete class attribute")
+        box = gui.vBox(self.controlArea, "Discrete Class Attribute")
         gui.radioButtonsInBox(
             box, self, "class_treatment",
             btnLabels=[t[0] for t in self.class_treats],
             callback=self.settings_changed)
 
-        zbbox = gui.widgetBox(self.controlArea, "Value range")
+        zbbox = gui.vBox(self.controlArea, "Value Range")
 
         gui.radioButtonsInBox(
             zbbox, self, "zero_based",
             btnLabels=self.value_ranges,
             callback=self.settings_changed)
 
-        gui.auto_commit(self.controlArea, self, "autosend", "Apply")
+        gui.auto_commit(self.buttonsArea, self, "autosend", "Apply", box=False)
 
         self.data = None
 
@@ -125,15 +126,14 @@ class OWContinuize(widget.OWWidget):
         else:
             self.send("Data", None)
 
-    def sendReport(self):
-        self.reportData(self.data, "Input data")
-        self.reportSettings(
+    def send_report(self):
+        self.report_items(
             "Settings",
             [("Multinominal attributes",
               self.multinomial_treats[self.multinomial_treatment][0]),
              ("Continuous attributes",
               self.continuous_treats[self.continuous_treatment][0]),
-             ("Class", self.class_treats[self.class_tereatment][0]),
+             ("Class", self.class_treats[self.class_treatment][0]),
              ("Value range", self.value_ranges[self.zero_based])])
 
 

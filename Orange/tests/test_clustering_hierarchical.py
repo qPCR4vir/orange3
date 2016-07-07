@@ -1,5 +1,8 @@
+# Test methods with long descriptive names can omit docstrings
+# pylint: disable=missing-docstring
+
 import unittest
-from itertools import chain
+from itertools import chain, tee
 
 import numpy
 
@@ -12,27 +15,28 @@ def flatten(seq):
 
 
 class TestHierarchical(unittest.TestCase):
-    def setUp(self):
+    @classmethod
+    def setUpClass(cls):
         m = [[],
-             [ 3],
-             [ 2, 4],
+             [3],
+             [2, 4],
              [17, 5, 4],
-             [ 2, 8, 3, 8],
-             [ 7, 5, 10, 11, 2],
-             [ 8, 4, 1, 5, 11, 13],
-             [ 4, 7, 12, 8, 10, 1, 5],
+             [2, 8, 3, 8],
+             [7, 5, 10, 11, 2],
+             [8, 4, 1, 5, 11, 13],
+             [4, 7, 12, 8, 10, 1, 5],
              [13, 9, 14, 15, 7, 8, 4, 6],
              [12, 10, 11, 15, 2, 5, 7, 3, 1]]
-        self.items = ["Ann", "Bob", "Curt", "Danny", "Eve", "Fred",
-                      "Greg", "Hue", "Ivy", "Jon"]
+        cls.items = ["Ann", "Bob", "Curt", "Danny", "Eve", "Fred",
+                     "Greg", "Hue", "Ivy", "Jon"]
 
         dist = numpy.array(list(flatten(m)), dtype=float)
         matrix = hierarchical.squareform(dist, mode="lower")
-        self.m = m
-        self.matrix = Orange.misc.DistMatrix(matrix)
-        self.matrix.items = self.items
+        cls.m = m
+        cls.matrix = Orange.misc.DistMatrix(matrix)
+        cls.matrix.items = cls.items
 
-        self.cluster = hierarchical.dist_matrix_clustering(self.matrix)
+        cls.cluster = hierarchical.dist_matrix_clustering(cls.matrix)
 
     def test_mapping(self):
         leaves = list(hierarchical.leaves(self.cluster))
@@ -66,10 +70,6 @@ class TestHierarchical(unittest.TestCase):
         pruned = hierarchical.prune(self.cluster, height=10)
         self.assertTrue(c.height >= 10 for c in hierarchical.preorder(pruned))
 
-        pruned = hierarchical.prune(self.cluster,
-                                    condition=lambda cl: len(cl) <= 3)
-        self.assertTrue(len(c) > 3 for c in hierarchical.preorder(pruned))
-
     def test_form(self):
         m = [[0, 2, 3, 4],
              [2, 0, 6, 7],
@@ -93,3 +93,49 @@ class TestHierarchical(unittest.TestCase):
                          ["B", "C", "A"])
         self.assertEqual([n.value for n in hierarchical.preorder(root)],
                          ["A", "B", "C"])
+
+    def test_optimal_ordering(self):
+        def indices(root):
+            return [leaf.value.index for leaf in hierarchical.leaves(root)]
+
+        ordered = hierarchical.optimal_leaf_ordering(
+            self.cluster, self.matrix)
+
+        self.assertEqual(ordered.value.range, self.cluster.value.range)
+        self.assertSetEqual(set(indices(self.cluster)),
+                            set(indices(ordered)))
+
+        def pairs(iterable):
+            i1, i2 = tee(iterable)
+            next(i1)
+            yield from zip(i1, i2)
+
+        def score(root):
+            return sum([self.matrix[i, j] for i, j in pairs(indices(root))])
+        score_unordered = score(self.cluster)
+        score_ordered = score(ordered)
+        self.assertGreater(score_unordered, score_ordered)
+        self.assertEqual(score_ordered, 21.0)
+
+
+class TestTree(unittest.TestCase):
+    def test_tree(self):
+        Tree = hierarchical.Tree
+
+        left = Tree(0, ())
+        self.assertTrue(left.is_leaf)
+        right = Tree(1, ())
+        self.assertEqual(left, Tree(0, ()))
+        self.assertNotEqual(left, right)
+        self.assertLess(left, right)
+
+        root = Tree(2, (left, right))
+        self.assertFalse(root.is_leaf)
+        self.assertIs(root.left, left)
+        self.assertIs(root.right, right)
+
+        val, br = root
+
+        self.assertEqual(val, 2)
+        self.assertEqual(br, (left, right))
+        self.assertEqual(repr(left), "Tree(value=0, branches=())")

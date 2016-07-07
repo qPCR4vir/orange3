@@ -296,7 +296,7 @@ def tooltip_helper(desc):
     tooltip = []
     tooltip.append("<b>{name}</b>".format(name=escape(desc.name)))
 
-    if desc.project_name and desc.project_name != "Orange":
+    if desc.project_name:
         tooltip[0] += " (from {0})".format(desc.project_name)
 
     if desc.description:
@@ -332,7 +332,7 @@ def whats_this_helper(desc, include_more_link=False):
     help_url = desc.help
 
     if not help_url:
-        help_url = "help://search?" + urlencode({"id": desc.id})
+        help_url = "help://search?" + urlencode({"id": desc.qualified_name})
 
     description = desc.description
     long_description = desc.long_description

@@ -1,27 +1,39 @@
+import contextlib
+import csv
+import locale
+import pickle
 import re
-import logging
 import subprocess
-from os import path
+import sys
+import warnings
+from tempfile import NamedTemporaryFile
+
+from os import path, unlink
 from ast import literal_eval
+from math import isnan
+from numbers import Number
 from itertools import chain, repeat
 from functools import lru_cache
 from collections import OrderedDict
+from urllib.parse import urlparse, unquote as urlunquote
+from urllib.request import urlopen
 
-import bottlechest as bn
+import bottleneck as bn
 import numpy as np
-
 from chardet.universaldetector import UniversalDetector
 
-from Orange.data.variable import *
-from Orange.util import abstract, Registry, flatten, namegen
+from Orange.data import (
+    _io, is_discrete_values, MISSING_VALUES, Table, Domain, Variable,
+    DiscreteVariable, StringVariable, ContinuousVariable, TimeVariable,
+)
+from Orange.util import Registry, flatten, namegen
 
-
-log = logging.getLogger()
 
 _IDENTITY = lambda i: i
 
 
 class Compression:
+    """Supported compression extensions"""
     GZIP = '.gz'
     BZIP2 = '.bz2'
     XZ = '.xz'
@@ -65,11 +77,11 @@ def detect_encoding(filename):
 
     # file not available or unable to guess the encoding, have chardet do it
     detector = UniversalDetector()
+    # We examine only first N 4kB blocks of file because chardet is really slow
+    MAX_BYTES = 4*1024*12
 
     def _from_file(f):
-        for line in f:
-            detector.feed(line)
-            if detector.done: break
+        detector.feed(f.read(MAX_BYTES))
         detector.close()
         return detector.result.get('encoding')
 
@@ -77,7 +89,7 @@ def detect_encoding(filename):
         with open_compressed(filename, 'rb') as f:
             return _from_file(f)
     elif isinstance(filename, bytes):
-        detector.feed(filename)
+        detector.feed(filename[:MAX_BYTES])
         detector.close()
         return detector.result.get('encoding')
     elif hasattr(filename, 'encoding'):
@@ -116,7 +128,7 @@ class Flags:
                     setattr(self, flag, True)
                     setattr(self, self.ALL.get(flag, ''), True)
             elif flag:
-                log.warning('Invalid attribute flag \'{}\''.format(flag))
+                warnings.warn('Invalid attribute flag \'{}\''.format(flag))
 
     @staticmethod
     def join(iterable, *args):
@@ -177,7 +189,7 @@ class FileFormatMeta(Registry):
 
     @property
     def readers(self):
-        return self._ext_to_attr_if_attr2('', 'read_file')
+        return self._ext_to_attr_if_attr2('', 'read')
 
     @property
     def img_writers(self):
@@ -188,7 +200,6 @@ class FileFormatMeta(Registry):
         return self._ext_to_attr_if_attr2('', 'write_graph')
 
 
-@abstract
 class FileFormat(metaclass=FileFormatMeta):
     """
     Subclasses set the following attributes and override the following methods:
@@ -197,10 +208,9 @@ class FileFormat(metaclass=FileFormatMeta):
         DESCRIPTION = 'human-readable file format description'
         SUPPORT_COMPRESSED = False
 
-        @classmethod
-        def read_file(cls, filename, wrapper=_IDENTITY):
+        def read(self):
             ...  # load headers, data, ...
-            return wrapper(self.data_table(data, headers))
+            return self.data_table(data, headers)
 
         @classmethod
         def write_file(cls, filename, data):
@@ -209,11 +219,113 @@ class FileFormat(metaclass=FileFormatMeta):
             writer.writerows(data)
 
     Wrapper FileFormat.data_table() returns Orange.data.Table from `data`
-    iterable (list (rows) of lists of values (cols)). `wrapper` is the
-    desired output class (if other than Table).
+    iterable (list (rows) of lists of values (cols)).
     """
 
-    OWSAVE_PRIORITY = 10000  # Sort order in OWSave widget combo box, lower is better
+    PRIORITY = 10000  # Sort order in OWSave widget combo box, lower is better
+
+    def __init__(self, filename):
+        """
+        Parameters
+        ----------
+        filename : str
+            name of the file to open
+        """
+        self.filename = filename
+        self.sheet = None
+
+    @property
+    def sheets(self):
+        """FileFormats with a notion of sheets should override this property
+        to return a list of sheet names in the file.
+
+        Returns
+        -------
+        a list of sheet names
+        """
+        return ()
+
+    def select_sheet(self, sheet):
+        """Select sheet to be read
+
+        Parameters
+        ----------
+        sheet : str
+            sheet name
+        """
+        self.sheet = sheet
+
+    @classmethod
+    def get_reader(cls, filename):
+        """Return reader instance that can be used to read the file
+
+        Parameters
+        ----------
+        filename : str
+
+        Returns
+        -------
+        FileFormat
+        """
+        for ext, reader in cls.readers.items():
+            if filename.endswith(ext):
+                return reader(filename)
+
+        raise IOError('No readers for file "{}"'.format(filename))
+
+    @classmethod
+    def write(cls, filename, data):
+        return cls.write_file(filename, data)
+
+    @classmethod
+    def write_table_metadata(cls, filename, data):
+        if isinstance(filename, str) and getattr(data, 'attributes', {}):
+            with open(filename + '.metadata', 'wb') as f:
+                pickle.dump(data.attributes, f, pickle.HIGHEST_PROTOCOL)
+
+    @classmethod
+    def set_table_metadata(cls, filename, table):
+        if isinstance(filename, str) and path.exists(filename + '.metadata'):
+            with open(filename + '.metadata', 'rb') as f:
+                table.attributes = pickle.load(f)
+
+    @classmethod
+    def locate(cls, filename, search_dirs=('.',)):
+        """Locate a file with given filename that can be opened by one
+        of the available readers.
+
+        Parameters
+        ----------
+        filename : str
+        search_dirs : Iterable[str]
+
+        Returns
+        -------
+        str
+            Absolute path to the file
+        """
+        if path.exists(filename):
+            return filename
+
+        for directory in search_dirs:
+            absolute_filename = path.join(directory, filename)
+            if path.exists(absolute_filename):
+                break
+            for ext in cls.readers:
+                if filename.endswith(ext):
+                    break
+                if path.exists(absolute_filename + ext):
+                    absolute_filename += ext
+                    break
+            if path.exists(absolute_filename):
+                break
+        else:
+            absolute_filename = ""
+
+        if not path.exists(absolute_filename):
+            raise IOError('File "{}" was not found.'.format(filename))
+
+        return absolute_filename
 
     @staticmethod
     def open(filename, *args, **kwargs):
@@ -223,20 +335,6 @@ class FileFormat(metaclass=FileFormatMeta):
         `filename` extension). Set ``SUPPORT_COMPRESSED=True`` if you use this.
         """
         return open_compressed(filename, *args, **kwargs)
-
-    @classmethod
-    def read(cls, filename, wrapper=None):
-        for ext, reader in cls.readers.items():
-            if filename.endswith(ext):
-                return reader.read_file(filename, wrapper)
-        else: raise IOError('No readers for file "{}"'.format(filename))
-
-    @classmethod
-    def write(cls, filename, data):
-        for ext, writer in cls.writers.items():
-            if filename.endswith(ext):
-                return writer.write_file(filename, data)
-        else: raise IOError('No writers for file "{}"'.format(filename))
 
     @staticmethod
     def parse_headers(data):
@@ -255,7 +353,6 @@ class FileFormat(metaclass=FileFormatMeta):
 
         data = iter(data)
         header_rows = []
-        try_single_header = False
 
         # Try to parse a three-line header
         lines = []
@@ -279,7 +376,7 @@ class FileFormat(metaclass=FileFormatMeta):
             except StopIteration: pass
             if lines:
                 # Header if none of the values in line 1 parses as a number
-                if not any(is_number(i) for i in lines[0]):
+                if not all(is_number(i) for i in lines[0]):
                     header_rows = [lines[0]]
                 else:
                     data = chain(lines, data)
@@ -352,9 +449,10 @@ class FileFormat(metaclass=FileFormatMeta):
             flag = Flags(Flags.split(flags[col]))
             if flag.i: continue
 
+            type_flag = types and types[col].strip()
             try:
-                orig_values = [np.nan if i.strip() in MISSING_VALUES else i.strip()
-                               for i in data[:, col]]
+                orig_values = [np.nan if i in MISSING_VALUES else i
+                               for i in (i.strip() for i in data[:, col])]
             except IndexError:
                 # No data instances leads here
                 orig_values = []
@@ -362,17 +460,26 @@ class FileFormat(metaclass=FileFormatMeta):
                 # only to satisfy test_table.TableTestCase.test_append
                 coltype = DiscreteVariable
 
-            type_flag = types and types[col].strip()
             coltype_kwargs = {}
             valuemap = []
             values = orig_values
 
             if type_flag in StringVariable.TYPE_HEADERS:
                 coltype = StringVariable
-
             elif type_flag in ContinuousVariable.TYPE_HEADERS:
                 coltype = ContinuousVariable
-                values = [float(i) for i in orig_values]
+                try:
+                    values = [float(i) for i in orig_values]
+                except ValueError:
+                    for row, num in enumerate(orig_values):
+                        try: float(num)
+                        except ValueError: break
+                    raise ValueError('Non-continuous value in (1-based) '
+                                     'line {}, column {}'.format(row + len(headers) + 1,
+                                                                 col + 1))
+
+            elif type_flag in TimeVariable.TYPE_HEADERS:
+                coltype = TimeVariable
 
             elif (type_flag in DiscreteVariable.TYPE_HEADERS or
                   _RE_DISCRETE_LIST.match(type_flag)):
@@ -390,7 +497,12 @@ class FileFormat(metaclass=FileFormatMeta):
                 else:
                     try: values = [float(i) for i in orig_values]
                     except ValueError:
-                        coltype = StringVariable
+                        tvar = TimeVariable('_')
+                        try: values = [tvar.parse(i) for i in orig_values]
+                        except ValueError:
+                            coltype = StringVariable
+                        else:
+                            coltype = TimeVariable
                     else:
                         coltype = ContinuousVariable
 
@@ -404,10 +516,9 @@ class FileFormat(metaclass=FileFormatMeta):
                 coltype = DiscreteVariable
                 coltype_kwargs.update(values=valuemap)
 
-            # Write back the changed data. This is needeed to pass the
-            # correct, converted values into Table.from_numpy below
-            try: data[:, col] = values
-            except IndexError: pass
+            if coltype is StringVariable:
+                values = ['' if i is np.nan else i
+                          for i in orig_values]
 
             if flag.m or coltype is StringVariable:
                 append_to = (Mcols, metas)
@@ -435,20 +546,23 @@ class FileFormat(metaclass=FileFormatMeta):
                     new_order, old_order = var.values, coltype_kwargs.get('values', var.values)
                     if new_order != old_order:
                         offset = len(new_order)
-                        column = data[:, col] if data.ndim > 1 else data
+                        column = values if data.ndim > 1 else data
                         column += offset
                         for i, val in enumerate(var.values):
                             try: oldval = old_order.index(val)
                             except ValueError: continue
                             bn.replace(column, offset + oldval, new_order.index(val))
 
-        # If single-header or no-header mode and no class variable marked,
-        # use the last attribute as class var
-        if len(headers) <= 1 and not clses and len(attrs) > 1:
-            clses.append(attrs.pop())
-            Ycols.append(Xcols.pop())
+            if coltype is TimeVariable:
+                # Re-parse the values because only now after coltype.make call
+                # above, variable var is the correct one
+                values = [var.parse(i) for i in orig_values]
 
-        from Orange.data import Table, Domain
+            # Write back the changed data. This is needeed to pass the
+            # correct, converted values into Table.from_numpy below
+            try: data[:, col] = values
+            except IndexError: pass
+
         domain = Domain(attrs, clses, metas)
 
         if not data.size:
@@ -498,121 +612,150 @@ class FileFormat(metaclass=FileFormatMeta):
         write(cls.header_flags(data))
 
     @classmethod
-    def write(cls, filename, data):
-        return cls.write_file(filename, data)
+    def write_data(cls, write, data):
+        """`write` is a callback that accepts an iterable"""
+        vars = list(chain((ContinuousVariable('_w'),) if data.has_weights() else (),
+                          data.domain.attributes,
+                          data.domain.class_vars,
+                          data.domain.metas))
+        for row in zip(data.W if data.W.ndim > 1 else data.W[:, np.newaxis],
+                       data.X,
+                       data.Y if data.Y.ndim > 1 else data.Y[:, np.newaxis],
+                       data.metas):
+            write(['' if isinstance(val, Number) and isnan(val) else
+                   var.values[int(val)] if var.is_discrete else
+                   var.repr_val(val) if isinstance(var, TimeVariable) else
+                   val
+                   for var, val in zip(vars, flatten(row))])
 
 
-class CSVFormat(FileFormat):
+class CSVReader(FileFormat):
+    """Reader for comma separated files"""
+
     EXTENSIONS = ('.csv',)
     DESCRIPTION = 'Comma-separated values'
     DELIMITERS = ',;:\t$ '
     SUPPORT_COMPRESSED = True
-    OWSAVE_PRIORITY = 20
+    PRIORITY = 20
 
-    @classmethod
-    def read_file(cls, filename, wrapper=None):
-        wrapper = wrapper or _IDENTITY
-        import csv
-        for encoding in (lambda: 'us-ascii',                 # fast
-                         lambda: detect_encoding(filename),  # precise
-                         lambda: 'utf-8'):                   # fallback
-            with cls.open(filename, mode='rt', newline='', encoding=encoding()) as file:
+    def read(self):
+        for encoding in (lambda: ('us-ascii', None),                 # fast
+                         lambda: (detect_encoding(self.filename), None),  # precise
+                         lambda: (locale.getpreferredencoding(False), None),
+                         lambda: (sys.getdefaultencoding(), None),   # desperate
+                         lambda: ('utf-8', None),                    # ...
+                         lambda: ('utf-8', 'ignore')):               # fallback
+            encoding, errors = encoding()
+            # Clear the error flag for all except the last check, because
+            # the error of second-to-last check is stored and shown as warning in owfile
+            if errors != 'ignore':
+                error = ''
+            with self.open(self.filename, mode='rt', newline='',
+                           encoding=encoding, errors=errors) as file:
                 # Sniff the CSV dialect (delimiter, quotes, ...)
                 try:
-                    dialect = csv.Sniffer().sniff(file.read(1024), cls.DELIMITERS)
-                except UnicodeDecodeError:
+                    dialect = csv.Sniffer().sniff(file.read(1024), self.DELIMITERS)
+                except UnicodeDecodeError as e:
+                    error = e
                     continue
                 except csv.Error:
                     dialect = csv.excel()
-                    dialect.delimiter = cls.DELIMITERS[0]
+                    dialect.delimiter = self.DELIMITERS[0]
 
                 file.seek(0)
                 dialect.skipinitialspace = True
 
                 try:
                     reader = csv.reader(file, dialect=dialect)
-                    return wrapper(cls.data_table(reader))
+                    data = self.data_table(reader)
+                    if error and isinstance(error, UnicodeDecodeError):
+                        pos, endpos = error.args[2], error.args[3]
+                        warning = ('Skipped invalid byte(s) in position '
+                                   '{}{}').format(pos,
+                                                  ('-' + str(endpos)) if (endpos - pos) > 1 else '')
+                        warnings.warn(warning)
+                    self.set_table_metadata(self.filename, data)
+                    return data
                 except Exception as e:
                     error = e
                     continue
-        raise ValueError('Cannot parse dataset {}: {}'.format(filename, error))
+        raise ValueError('Cannot parse dataset {}: {}'.format(self.filename, error))
 
     @classmethod
     def write_file(cls, filename, data):
-        import csv
         with cls.open(filename, mode='wt', newline='', encoding='utf-8') as file:
             writer = csv.writer(file, delimiter=cls.DELIMITERS[0])
             cls.write_headers(writer.writerow, data)
-            writer.writerows([[inst.weight] * data.has_weights() +
-                              inst.list for inst in data])
+            cls.write_data(writer.writerow, data)
+        cls.write_table_metadata(filename, data)
 
 
-class TabFormat(CSVFormat):
+class TabReader(CSVReader):
+    """Reader for tab separated files"""
     EXTENSIONS = ('.tab', '.tsv')
     DESCRIPTION = 'Tab-separated values'
     DELIMITERS = '\t'
-    OWSAVE_PRIORITY = 10
+    PRIORITY = 10
 
 
-class PickleFormat(FileFormat):
+class PickleReader(FileFormat):
+    """Reader for pickled Table objects"""
     EXTENSIONS = ('.pickle', '.pkl')
     DESCRIPTION = 'Pickled Python object file'
 
-    @staticmethod
-    def read_file(filename, wrapper=None):
-        wrapper = wrapper or _IDENTITY
-        import pickle
-        with open(filename, 'rb') as f:
-            return wrapper(pickle.load(f))
+    def read(self):
+        with open(self.filename, 'rb') as f:
+            return pickle.load(f)
 
     @staticmethod
     def write_file(filename, data):
-        import pickle
         with open(filename, 'wb') as f:
             pickle.dump(data, f, pickle.HIGHEST_PROTOCOL)
 
 
-class BasketFormat(FileFormat):
+class BasketReader(FileFormat):
+    """Reader for basket (sparse) files"""
     EXTENSIONS = ('.basket', '.bsk')
     DESCRIPTION = 'Basket file'
 
-    @classmethod
-    def read_file(cls, filename, storage_class=None):
-        from Orange.data import _io, Table, Domain
-        import sys
-        if storage_class is None:
-            storage_class = Table
-
+    def read(self):
         def constr_vars(inds):
             if inds:
                 return [ContinuousVariable(x.decode("utf-8")) for _, x in
                         sorted((ind, name) for name, ind in inds.items())]
 
         X, Y, metas, attr_indices, class_indices, meta_indices = \
-            _io.sparse_read_float(filename.encode(sys.getdefaultencoding()))
+            _io.sparse_read_float(self.filename.encode(sys.getdefaultencoding()))
 
         attrs = constr_vars(attr_indices)
         classes = constr_vars(class_indices)
         meta_attrs = constr_vars(meta_indices)
         domain = Domain(attrs, classes, meta_attrs)
-        return storage_class.from_numpy(
+        return Table.from_numpy(
             domain, attrs and X, classes and Y, metas and meta_attrs)
 
 
-class ExcelFormat(FileFormat):
+class ExcelReader(FileFormat):
+    """Reader for excel files"""
     EXTENSIONS = ('.xls', '.xlsx')
     DESCRIPTION = 'Mircosoft Excel spreadsheet'
 
-    @classmethod
-    def read_file(cls, filename, wrapper=None):
-        wrapper = wrapper or _IDENTITY
-        file_name, _, sheet_name = filename.rpartition(':')
-        if not path.isfile(file_name):
-            file_name, sheet_name = filename, ''
+    def __init__(self, filename):
+        super().__init__(filename)
+
+        from xlrd import open_workbook
+        self.workbook = open_workbook(self.filename)
+
+    @property
+    @lru_cache(1)
+    def sheets(self):
+        return self.workbook.sheet_names()
+
+    def read(self):
         import xlrd
-        wb = xlrd.open_workbook(file_name, on_demand=True)
-        if sheet_name:
-            ss = wb.sheet_by_name(sheet_name)
+        wb = xlrd.open_workbook(self.filename, on_demand=True)
+        if self.sheet:
+            ss = wb.sheet_by_name(self.sheet)
         else:
             ss = wb.sheet_by_index(0)
         try:
@@ -623,18 +766,19 @@ class ExcelFormat(FileFormat):
                            [[str(ss.cell_value(row, col)) if col < ss.row_len(row) else ''
                              for col in range(first_col, row_len)]
                             for row in range(first_row, ss.nrows)])
-            table = cls.data_table(cells)
+            table = self.data_table(cells)
         except Exception:
-            raise IOError("Couldn't load spreadsheet from " + file_name)
-        return wrapper(table)
+            raise IOError("Couldn't load spreadsheet from " + self.filename)
+        return table
 
 
-class DotFormat(FileFormat):
+class DotReader(FileFormat):
+    """Writer for dot (graph) files"""
     EXTENSIONS = ('.dot', '.gv')
     DESCRIPTION = 'Dot graph description'
     SUPPORT_COMPRESSED = True
 
-    @staticmethod
+    @classmethod
     def write_graph(cls, filename, graph):
         from sklearn import tree
         tree.export_graphviz(graph, out_file=cls.open(filename, 'wt'))
@@ -644,3 +788,65 @@ class DotFormat(FileFormat):
         if type(tree) == dict:
             tree = tree['tree']
         cls.write_graph(filename, tree)
+
+
+class UrlReader(FileFormat):
+    def read(self):
+        self.filename = self._trim(self._resolve_redirects(self.filename))
+
+        with contextlib.closing(urlopen(self.filename, timeout=10)) as response:
+            name = self._suggest_filename(response.headers['content-disposition'])
+            with NamedTemporaryFile(suffix=name, delete=False) as f:
+                f.write(response.read())
+                # delete=False is a workaround for https://bugs.python.org/issue14243
+
+            reader = self.get_reader(f.name)
+            data = reader.read()
+            unlink(f.name)
+        # Override name set in from_file() to avoid holding the temp prefix
+        data.name = path.splitext(name)[0]
+        data.origin = self.filename
+        return data
+
+    def _resolve_redirects(self, url):
+        # Resolve (potential) redirects to a final URL
+        with contextlib.closing(urlopen(url, timeout=10)) as response:
+            return response.url
+
+    def _trim(self, url):
+        URL_TRIMMERS = (
+            self._trim_googlesheet_url,
+        )
+        for trim in URL_TRIMMERS:
+            try:
+                url = trim(url)
+            except ValueError:
+                continue
+            else:
+                break
+        return url
+
+    def _trim_googlesheet_url(self, url):
+        match = re.match(r'(?:https?://)?(?:www\.)?'
+                         'docs\.google\.com/spreadsheets/d/'
+                         '(?P<workbook_id>[-\w_]+)'
+                         '(?:/.*?gid=(?P<sheet_id>\d+).*|.*)?',
+                         url, re.IGNORECASE)
+        try:
+            workbook, sheet = match.group('workbook_id'), match.group('sheet_id')
+            if not workbook:
+                raise ValueError
+        except (AttributeError, ValueError):
+            raise ValueError
+        url = 'https://docs.google.com/spreadsheets/d/{}/export?format=tsv'.format(workbook)
+        if sheet:
+            url += '&gid=' + sheet
+        return url
+
+    def _suggest_filename(self, content_disposition):
+        default_name = re.sub(r'[\\:/]', '_', urlparse(self.filename).path)
+
+        # See https://tools.ietf.org/html/rfc6266#section-4.1
+        matches = re.findall(r"filename\*?=(?:\"|.{0,10}?'[^']*')([^\"]+)",
+                             content_disposition or '')
+        return urlunquote(matches[-1]) if matches else default_name

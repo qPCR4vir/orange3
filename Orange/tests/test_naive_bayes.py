@@ -1,38 +1,37 @@
+# Test methods with long descriptive names can omit docstrings
+# pylint: disable=missing-docstring
+
 import unittest
 
-import Orange
 from Orange.classification import NaiveBayesLearner
+from Orange.data import Table
+from Orange.evaluation import CrossValidation, CA
 
 
-class NaiveBayesTest(unittest.TestCase):
+class TestNaiveBayesLearner(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        data = Table('titanic')
+        cls.learner = NaiveBayesLearner()
+        cls.model = cls.learner(data)
+        cls.table = data[::20]
+
     def test_NaiveBayes(self):
-        table = Orange.data.Table('titanic')
-        bayes = NaiveBayesLearner()
-        results = Orange.evaluation.CrossValidation(table[::20], [bayes], k=10)
-        ca = Orange.evaluation.CA(results)
+        results = CrossValidation(self.table, [self.learner], k=10)
+        ca = CA(results)
         self.assertGreater(ca, 0.7)
         self.assertLess(ca, 0.9)
 
     def test_predict_single_instance(self):
-        table = Orange.data.Table('titanic')
-        bayes = NaiveBayesLearner()
-        c = bayes(table)
-        for ins in table[::20]:
-            c(ins)
-            val, prob = c(ins, c.ValueProbs)
+        for ins in self.table:
+            self.model(ins)
+            val, prob = self.model(ins, self.model.ValueProbs)
 
     def test_predict_table(self):
-        table = Orange.data.Table('titanic')
-        bayes = NaiveBayesLearner()
-        c = bayes(table)
-        table = table[::20]
-        c(table)
-        vals, probs = c(table, c.ValueProbs)
+        self.model(self.table)
+        vals, probs = self.model(self.table, self.model.ValueProbs)
 
     def test_predict_numpy(self):
-        table = Orange.data.Table('titanic')
-        bayes = NaiveBayesLearner()
-        c = bayes(table)
-        X = table.X[::20]
-        c(X)
-        vals, probs = c(X, c.ValueProbs)
+        X = self.table.X[::20]
+        self.model(X)
+        vals, probs = self.model(X, self.model.ValueProbs)

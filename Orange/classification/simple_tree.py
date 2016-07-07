@@ -1,5 +1,3 @@
-import os
-import sysconfig
 import ctypes as ct
 
 import numpy as np
@@ -7,10 +5,8 @@ from Orange.base import Learner, Model
 
 __all__ = ['SimpleTreeLearner']
 
-path = os.path.dirname(os.path.abspath(__file__))
-
-_tree = ct.pydll.LoadLibrary(
-    os.path.join(path, "_simple_tree" + sysconfig.get_config_var("SO")))
+from . import _simple_tree
+_tree = ct.pydll.LoadLibrary(_simple_tree.__file__)
 
 DiscreteNode = 0
 ContinuousNode = 1
@@ -276,21 +272,27 @@ class SimpleTreeModel(Model):
             else:
                 node = self.node
         n = node.contents
+        if self.type == Classification:
+            decimals = 1
+        else:
+            decimals = self.domain.class_var.number_of_decimals
         if n.children_size == 0:
             if self.type == Classification:
-                node_cont = [n.dist[i] for i in range(self.cls_vals)]
+                node_cont = [round(n.dist[i], decimals)
+                             for i in range(self.cls_vals)]
                 index = node_cont.index(max(node_cont))
                 major_class = self.cls_vars[0].values[index]
+                return ' --> %s (%s)' % (major_class, node_cont)
             else:
-                node_cont = str(n.sum) + ': ' + str(n.n)
-                major_class = n.sum / n.n
-            return ' --> %s (%s)' % (major_class, node_cont)
+                node_cont = str(round(n.sum / n.n, decimals)) + ': ' + str(n.n)
+                return ' --> (%s)' % node_cont
         else:
             node_desc = self.dom_attr[n.split_attr].name
             if self.type == Classification:
-                node_cont = [n.dist[i] for i in range(self.cls_vals)]
+                node_cont = [round(n.dist[i], decimals)
+                             for i in range(self.cls_vals)]
             else:
-                node_cont = str(n.sum) + ': ' + str(n.n)
+                node_cont = str(round(n.sum / n.n, decimals)) + ': ' + str(n.n)
             ret_str = '\n' + '   ' * level + '%s (%s)' % (node_desc,
                                                           node_cont)
             for i in range(n.children_size):

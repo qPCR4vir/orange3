@@ -1,15 +1,20 @@
 import sys
 import sysconfig
 import os
+import re
 import errno
 import shlex
+import shutil
 import subprocess
 import itertools
 import concurrent.futures
 
+from site import USER_SITE
+from glob import iglob
 from collections import namedtuple, deque
 from xml.sax.saxutils import escape
 from distutils import version
+from email.parser import HeaderParser
 
 import pkg_resources
 
@@ -31,9 +36,11 @@ from PyQt4.QtCore import (
 )
 from PyQt4.QtCore import pyqtSignal as Signal, pyqtSlot as Slot
 
+from ..config import ADDON_KEYWORD
 from ..gui.utils import message_warning, message_information, \
-                        message_critical as message_error
-from ..help.manager import get_dist_meta, trim
+                        message_critical as message_error, \
+                        OSX_NSURL_toLocalFile
+from ..help.manager import get_dist_meta, trim, parse_meta
 
 OFFICIAL_ADDONS = [
     "Orange-Bioinformatics",
@@ -41,6 +48,7 @@ OFFICIAL_ADDONS = [
     "Orange3-Prototypes",
     "Orange3-Text",
     "Orange3-Network",
+    "Orange3-Associate",
 ]
 
 Installable = namedtuple(
@@ -140,6 +148,33 @@ class TristateCheckItemDelegate(QStyledItemDelegate):
                 Qt.Unchecked if checkstate == Qt.Checked else Qt.Checked
 
         return model.setData(index, checkstate, Qt.CheckStateRole)
+
+
+def get_meta_from_archive(path):
+    """Return project name, version and summary extracted from
+    sdist or wheel metadata in a ZIP or tar.gz archive, or None if metadata
+    can't be found."""
+
+    def is_metadata(fname):
+        return fname.endswith(('PKG-INFO', 'METADATA'))
+
+    meta = None
+    if path.endswith(('.zip', '.whl')):
+        from zipfile import ZipFile
+        with ZipFile(path) as archive:
+            meta = next(filter(is_metadata, archive.namelist()), None)
+            if meta:
+                meta = archive.read(meta).decode('utf-8')
+    elif path.endswith(('.tar.gz', '.tgz')):
+        import tarfile
+        with tarfile.open(path) as archive:
+            meta = next(filter(is_metadata, archive.getnames()), None)
+            if meta:
+                meta = archive.extractfile(meta).read().decode('utf-8')
+    if meta:
+        meta = parse_meta(meta)
+        return [meta.get(key, '')
+                for key in ('Name', 'Version', 'Description', 'Summary')]
 
 
 class AddonManagerWidget(QWidget):
@@ -288,6 +323,14 @@ class AddonManagerWidget(QWidget):
         else:
             return -1
 
+    def set_install_projects(self, names):
+        """Mark for installation the add-ons that match any of names"""
+        model = self.__model
+        for row in range(model.rowCount()):
+            item = model.item(row, 1)
+            if item.text() in names:
+                model.item(row, 0).setCheckState(Qt.Checked)
+
     def __data_changed(self, topleft, bottomright):
         rows = range(topleft.row(), bottomright.row() + 1)
         proxy = self.__view.model()
@@ -337,8 +380,8 @@ class AddonManagerWidget(QWidget):
         if isinstance(item, Installed):
             remote, dist = item
             if remote is None:
-                description = get_dist_meta(dist).get("Description")
-                description = description
+                meta = get_dist_meta(dist)
+                description = meta.get("Description") or meta.get('Summary')
             else:
                 description = remote.description
         else:
@@ -385,7 +428,7 @@ class AddonManagerDialog(QDialog):
     _packages = None
 
     def __init__(self, parent=None, **kwargs):
-        super().__init__(parent, **kwargs)
+        super().__init__(parent, acceptDrops=True, **kwargs)
         self.setLayout(QVBoxLayout())
         self.layout().setContentsMargins(0, 0, 0, 0)
 
@@ -395,10 +438,6 @@ class AddonManagerDialog(QDialog):
         info_bar = QWidget()
         info_layout = QHBoxLayout()
         info_bar.setLayout(info_layout)
-        info_icon = QLabel()
-        info_text = QLabel()
-        info_layout.addWidget(info_icon)
-        info_layout.addWidget(info_text)
         self.layout().addWidget(info_bar)
 
         buttons = QDialogButtonBox(
@@ -410,19 +449,9 @@ class AddonManagerDialog(QDialog):
 
         self.layout().addWidget(buttons)
 
-        if not os.access(sysconfig.get_path("purelib"), os.W_OK):
-            if sysconfig.get_platform().startswith("macosx"):
-                info = "You must install Orange by dragging it into" \
-                       " Applications before installing add-ons."
-            else:
-                info = "You do not have permissions to write into Orange " \
-                       "directory.\nYou may need to contact an administrator " \
-                       "for assistance."
-            info_text.setText(info)
-            style = QApplication.instance().style()
-            info_icon.setPixmap(style.standardIcon(
-                QStyle.SP_MessageBoxCritical).pixmap(14, 14))
-            buttons.button(QDialogButtonBox.Ok ).setEnabled(False)
+        # No system access => install into user site-packages
+        self.user_install = not os.access(sysconfig.get_path("purelib"),
+                                          os.W_OK)
 
         self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         if AddonManagerDialog._packages is None:
@@ -528,6 +557,33 @@ class AddonManagerDialog(QDialog):
             self.__thread.quit()
             self.__thread.wait(1000)
 
+    ADDON_EXTENSIONS = ('.zip', '.whl', '.tar.gz')
+
+    def dragEnterEvent(self, event):
+        urls = event.mimeData().urls()
+        if any((OSX_NSURL_toLocalFile(url) or url.toLocalFile())
+                .endswith(self.ADDON_EXTENSIONS) for url in urls):
+            event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        """Allow dropping add-ons (zip or wheel archives) on this dialog to
+        install them"""
+        packages = []
+        names = []
+        for url in event.mimeData().urls():
+            path = OSX_NSURL_toLocalFile(url) or url.toLocalFile()
+            if path.endswith(self.ADDON_EXTENSIONS):
+                name, vers, summary, descr = (get_meta_from_archive(path) or
+                                              (os.path.basename(path), '', '', ''))
+                names.append(name)
+                packages.append(
+                    Installable(name, vers, summary,
+                                descr or summary, path, [path]))
+        future = concurrent.futures.Future()
+        future.set_result((AddonManagerDialog._packages or []) + packages)
+        self._set_packages(future)
+        self.addonwidget.set_install_projects(names)
+
     def __accepted(self):
         steps = self.addonwidget.item_state()
 
@@ -536,7 +592,8 @@ class AddonManagerDialog(QDialog):
             steps = sorted(
                 steps, key=lambda step: 0 if step[0] == Uninstall else 1
             )
-            self.__installer = Installer(steps=steps)
+            self.__installer = Installer(steps=steps,
+                                         user_install=self.user_install)
             self.__thread = QThread(self)
             self.__thread.start()
 
@@ -564,9 +621,11 @@ class AddonManagerDialog(QDialog):
         self.reject()
 
     def __on_installer_finished(self):
-        message_information(
-            "Please restart Orange for changes to take effect.",
-            parent=self)
+        message = (
+            ("Changes successfully applied in <i>{}</i>.<br>".format(
+                USER_SITE) if self.user_install else '') +
+            "Please restart Orange for changes to take effect.")
+        message_information(message, parent=self)
         self.accept()
 
 
@@ -576,20 +635,31 @@ def list_pypi_addons():
     """
     from ..config import ADDON_PYPI_SEARCH_SPEC
     import xmlrpc.client
-    pypi = xmlrpc.client.ServerProxy("http://pypi.python.org/pypi")
+    pypi = xmlrpc.client.ServerProxy(
+        "https://pypi.python.org/pypi",
+        transport=xmlrpc.client.SafeTransport()
+    )
     addons = pypi.search(ADDON_PYPI_SEARCH_SPEC)
 
     for addon in OFFICIAL_ADDONS:
         if not any(a for a in addons if a['name'] == addon):
-            versions = pypi.package_releases(addon)
-            if versions:
-                addons.append({"name": addon, "version": max(versions)})
+            addons.append({"name": addon, "version": '0'})
 
     multicall = xmlrpc.client.MultiCall(pypi)
     for addon in addons:
-        name, version = addon["name"], addon["version"]
-        multicall.release_data(name, version)
-        multicall.release_urls(name, version)
+        name = addon["name"]
+        multicall.package_releases(name)
+
+    releases = multicall()
+    multicall = xmlrpc.client.MultiCall(pypi)
+    for addon, versions in zip(addons, releases):
+        # Workaround for PyPI bug of search not returning the latest versions
+        # https://bitbucket.org/pypa/pypi/issues/326/my-package-doesnt-appear-in-the-search
+        version_ = max(versions, key=version.LooseVersion)
+
+        name = addon["name"]
+        multicall.release_data(name, version_)
+        multicall.release_urls(name, version_)
 
     results = list(multicall())
     release_data = results[::2]
@@ -597,17 +667,19 @@ def list_pypi_addons():
     packages = []
 
     for release, urls in zip(release_data, release_urls):
-        urls = [ReleaseUrl(url["filename"], url["url"],
-                           url["size"], url["python_version"],
-                           url["packagetype"])
-                for url in urls]
-        packages.append(
-            Installable(release["name"], release["version"],
-                        release["summary"], release["description"],
-                        release["package_url"],
-                        urls)
-        )
-
+        if release and urls:
+            # ignore releases without actual source/wheel/egg files,
+            # or with empty metadata (deleted from PyPi?).
+            urls = [ReleaseUrl(url["filename"], url["url"],
+                               url["size"], url["python_version"],
+                               url["packagetype"])
+                    for url in urls]
+            packages.append(
+                Installable(release["name"], release["version"],
+                            release["summary"], release["description"],
+                            release["package_url"],
+                            urls)
+            )
     return packages
 
 
@@ -638,10 +710,11 @@ class Installer(QObject):
     finished = Signal()
     error = Signal(str, object, int, list)
 
-    def __init__(self, parent=None, steps=[]):
+    def __init__(self, parent=None, steps=[], user_install=False):
         QObject.__init__(self, parent)
         self.__interupt = False
         self.__queue = deque(steps)
+        self.__user_install = user_install
 
     def start(self):
         QTimer.singleShot(0, self._next)
@@ -656,15 +729,17 @@ class Installer(QObject):
     @Slot()
     def _next(self):
         def fmt_cmd(cmd):
-            return "python " + (" ".join(map(shlex.quote, cmd)))
+            return "Command failed: python " + " ".join(map(shlex.quote, cmd))
 
         command, pkg = self.__queue.popleft()
         if command == Install:
             inst = pkg.installable
+            inst_name = inst.name if inst.package_url.startswith("http://") else inst.package_url
             self.setStatusMessage("Installing {}".format(inst.name))
-            links = []
 
-            cmd = ["-m", "pip", "install"] + links + [inst.name]
+            cmd = (["-m", "pip", "install"] +
+                   (["--user"] if self.__user_install else []) +
+                   [inst_name])
             process = python_process(cmd, bufsize=-1, universal_newlines=True)
             retcode, output = self.__subprocessrun(process)
 
@@ -674,9 +749,12 @@ class Installer(QObject):
 
         elif command == Upgrade:
             inst = pkg.installable
+            inst_name = inst.name if inst.package_url.startswith("http://") else inst.package_url
             self.setStatusMessage("Upgrading {}".format(inst.name))
 
-            cmd = ["-m", "pip", "install", "--upgrade", "--no-deps", inst.name]
+            cmd = (["-m", "pip", "install", "--upgrade", "--no-deps"] +
+                   (["--user"] if self.__user_install else []) +
+                   [inst_name])
             process = python_process(cmd, bufsize=-1, universal_newlines=True)
             retcode, output = self.__subprocessrun(process)
 
@@ -684,7 +762,10 @@ class Installer(QObject):
                 self.error.emit(fmt_cmd(cmd), pkg, retcode, output)
                 return
 
-            cmd = ["-m", "pip", "install", inst.name]
+            # Why is this here twice??
+            cmd = (["-m", "pip", "install"] +
+                   (["--user"] if self.__user_install else []) +
+                   [inst_name])
             process = python_process(cmd, bufsize=-1, universal_newlines=True)
             retcode, output = self.__subprocessrun(process)
 
@@ -699,6 +780,28 @@ class Installer(QObject):
             cmd = ["-m", "pip", "uninstall", "--yes", dist.project_name]
             process = python_process(cmd, bufsize=-1, universal_newlines=True)
             retcode, output = self.__subprocessrun(process)
+
+            if self.__user_install:
+                # Remove the package forcefully; pip doesn't (yet) uninstall
+                # --user packages (or any package outside sys.prefix?)
+                # google: pip "Not uninstalling ?" "outside environment"
+                install_path = os.path.join(
+                    USER_SITE, re.sub('[^\w]', '_', dist.project_name))
+                pip_record = next(iglob(install_path + '*.dist-info/RECORD'),
+                                  None)
+                if pip_record:
+                    with open(pip_record) as f:
+                        files = [line.rsplit(',', 2)[0] for line in f]
+                else:
+                    files = [os.path.join(
+                        USER_SITE, 'orangecontrib',
+                        dist.project_name.split('-')[-1].lower()),]
+                for match in itertools.chain(files, iglob(install_path + '*')):
+                    print('rm -rf', match)
+                    if os.path.isdir(match):
+                        shutil.rmtree(match)
+                    elif os.path.exists(match):
+                        os.unlink(match)
 
             if retcode != 0:
                 self.error.emit(fmt_cmd(cmd), pkg, retcode, output)
@@ -727,14 +830,6 @@ class Installer(QObject):
             print(line, end="")
 
         return process.returncode, output
-
-
-def pip_install(args, **kwargs):
-    return python_process(["-m", "pip", "install"] + args, **kwargs)
-
-
-def pip_uninstall(args, **kwargs):
-    return python_process(["-m", "pip", "uninstall"] + args, **kwargs)
 
 
 def python_process(args, script_name=None, cwd=None, env=None, **kwargs):

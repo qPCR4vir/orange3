@@ -20,6 +20,7 @@ from Orange.preprocess.discretize import EqualWidth, Discretizer
 from Orange.widgets import widget, gui, settings
 from Orange.widgets.utils import itemmodels, colorpalette
 from Orange.widgets.io import FileFormat
+from Orange.canvas import report
 
 
 def is_not_none(obj):
@@ -471,7 +472,7 @@ class OWScatterMap(widget.OWWidget):
     sample_percentages = []
     sample_percentages_captions = []
     sample_times = [0.5, 3, 5, 20, 40, 80]
-    sample_times_captions = ['1s', '5s', '10s', '30s', '1min', '2min']
+    sample_times_captions = ['1 s', '5 s', '10 s', '30 s', '1 min', '2 min']
 
     use_cache = settings.Setting(True)
 
@@ -479,7 +480,7 @@ class OWScatterMap(widget.OWWidget):
 
     mouse_mode = 0
 
-    want_graph = True
+    graph_name = "plot.plotItem"
 
     def __init__(self):
         super().__init__()
@@ -494,7 +495,7 @@ class OWScatterMap(widget.OWWidget):
 
         self.colors = colorpalette.ColorPaletteGenerator(10)
 
-        box = gui.widgetBox(self.controlArea, "Axes")
+        box = gui.vBox(self.controlArea, "Axes")
         self.x_var_model = itemmodels.VariableListModel()
         self.comboBoxAttributesX = gui.comboBox(
             box, self, value='x_var_index', callback=self.replot,
@@ -507,7 +508,7 @@ class OWScatterMap(widget.OWWidget):
             contentsLength=12)
         self.comboBoxAttributesY.setModel(self.y_var_model)
 
-        box = gui.widgetBox(self.controlArea, "Color")
+        box = gui.vBox(self.controlArea, "Color")
         self.z_var_model = itemmodels.VariableListModel()
         self.comboBoxClassvars = gui.comboBox(
             box, self, value='z_var_index',
@@ -522,11 +523,11 @@ class OWScatterMap(widget.OWWidget):
             addSpace=False
         )
         gui.comboBox(box, self, "color_scale", label="Scale: ",
-                     orientation="horizontal",
+                     orientation=Qt.Horizontal,
                      items=["Linear", "Square root", "Logarithmic"],
                      callback=self._on_color_scale_changed)
 
-        self.sampling_box = gui.widgetBox(self.controlArea, "Sampling")
+        self.sampling_box = gui.vBox(self.controlArea, "Sampling")
         sampling_options = (self.sample_times_captions +
                             self.sample_percentages_captions)
         self.sample_combo = gui.comboBox(
@@ -566,7 +567,6 @@ class OWScatterMap(widget.OWWidget):
         self.plot.getViewBox().sigTransformChanged.connect(
             self._on_transform_changed)
         self.mainArea.layout().addWidget(self.plot)
-        self.graphButton.clicked.connect(self.save_graph)
 
     def set_data(self, dataset):
         self.closeContext()
@@ -808,26 +808,25 @@ class OWScatterMap(widget.OWWidget):
         def bin_func(xbins, ybins):
             return grid_bin(data, xvar, yvar, xbins, ybins, zvar)
 
-        self.progressBarInit()
         last_node = root
         update_time = time.time()
         changed = False
 
-        for i, node in enumerate(
-                sharpen_region(self._root, region, nbins, bin_func)):
-            tick = time.time() - update_time
-            changed = changed or node is not last_node
-            if changed and ((i % nbins == 0) or tick > 2.0):
-                self.update_map(node)
-                last_node = node
-                changed = False
-                update_time = time.time()
-                self.progressBarSet(100 * i / (nbins ** 2))
+        with self.progressBar(nbins ** 2) as progress_bar:
+            for i, node in enumerate(
+                    sharpen_region(self._root, region, nbins, bin_func)):
+                tick = time.time() - update_time
+                changed = changed or node is not last_node
+                if changed and ((i % nbins == 0) or tick > 2.0):
+                    self.update_map(node)
+                    last_node = node
+                    changed = False
+                    update_time = time.time()
+                    progress_bar.advance()
 
         self._root = last_node
         self._cache[xvar, yvar, zvar] = self._root
         self.update_map(self._root)
-        self.progressBarFinished()
 
     def _sampling_width(self):
         if self._item is None:
@@ -909,26 +908,23 @@ class OWScatterMap(widget.OWWidget):
         scored_rects = sorted(scored_rects, reverse=True,
                               key=operator.itemgetter(0))
         root = self._root
-        self.progressBarInit()
         update_time = time.time()
 
-        for i, (_, rect) in enumerate(scored_rects):
-            root = sharpen_region_recur(
-                root, rect.intersect(region),
-                nbins, depth + 1, bin_func
-            )
-            tick = time.time() - update_time
-            if tick > 2.0:
-                self.update_map(root)
-                update_time = time.time()
-
-            self.progressBarSet(100 * i / len(scored_rects))
+        with self.progressBar(len(scored_rects)) as progress_bar:
+            for i, (_, rect) in enumerate(scored_rects):
+                root = sharpen_region_recur(
+                    root, rect.intersected(region),
+                    nbins, depth + 1, bin_func)
+                tick = time.time() - update_time
+                if tick > 2.0:
+                    self.update_map(root)
+                    update_time = time.time()
+                progress_bar.advance()
 
         self._root = root
 
         self._cache[xvar, yvar, zvar] = self._root
         self.update_map(self._root)
-        self.progressBarFinished()
 
     def select_nodes_to_sharpen(self, node, region, bw, depth):
         """
@@ -976,12 +972,22 @@ class OWScatterMap(widget.OWWidget):
         self.clear()
         super().onDeleteWidget()
 
-    def save_graph(self):
-        from Orange.widgets.data.owsave import OWSave
+    def get_widget_name_extension(self):
+        if self.dataset is None:
+            return
+        if self.x_var_index < 0 or self.y_var_index < 0:
+            return
+        return "{} vs {}".format(
+            self.x_var_model[self.x_var_index],
+            self.y_var_model[self.y_var_index])
 
-        save_img = OWSave(data=self.plot.plotItem,
-                          file_formats=FileFormat.img_writers)
-        save_img.exec_()
+    def send_report(self):
+        if self.dataset is None:
+            return
+        caption = report.list_legend(self.z_values_view,
+                                     self.selected_z_values)
+        self.report_plot()
+        self.report_caption(caption)
 
 
 def grid_bin(data, xvar, yvar, xbins, ybins, zvar=None):
@@ -1211,7 +1217,7 @@ def stack_tile_blocks(blocks):
 
 def bindices(node, rect):
     assert rect.normalized() == rect
-    assert not rect.intersect(QRectF(*node.brect)).isEmpty()
+    assert not rect.intersected(QRectF(*node.brect)).isEmpty()
 
     xs = np.searchsorted(node.xbins, rect.left(), side="left") - 1
     xe = np.searchsorted(node.xbins, rect.right(), side="right")
@@ -1321,60 +1327,31 @@ def score_candidate_rects(node, region):
 
 
 def compute_chi_squares(observes):
+    """Compute chi2 scores of given observations.
+
+    Assumes that data is generated by two independent distributions,
+    one for rows and one for columns and estimate distribution parameters
+    from data.
+
+    Parameters
+    ----------
+    observes : numpy array with dimensions (N_CLASSES * N_ROWS * N_COLUMNS)
+        Multiple contingencies containing observations for multiple classes.
+    """
+    CLASSES, COLS, ROWS = 0, 1, 2
+
+    n = observes.sum((ROWS, COLS), keepdims=True)
+    row_sums = observes.sum(ROWS, keepdims=True)
+    col_sums = observes.sum(COLS, keepdims=True)
+    estimates = row_sums * col_sums / n
+
+    chi2 = np.nan_to_num(np.nansum((observes - estimates)**2 / estimates, axis=CLASSES))
+
     # compute chi squares for left-right neighbours
+    chi2lr = chi2[:,:-1] + chi2[:,1:]
+    chi2ud = chi2[:-1,:] + chi2[1:,:]
 
-    def get_estimates(observes):
-        estimates = []
-        for obs in observes:
-            n = obs.sum()
-            sum_rows = obs.sum(1)
-            sum_cols = obs.sum(0)
-            prob_rows = sum_rows / n
-            prob_cols = sum_cols / n
-            rows, cols = np.indices(obs.shape)
-            est = np.zeros(obs.shape)
-            est[rows, cols] = n * prob_rows[rows] * prob_cols[cols]
-            estimates.append(est)
-        return np.nan_to_num(np.array(estimates))
-
-    estimates = get_estimates(observes)
-
-    depth, rows, coll = np.indices(( observes.shape[0], observes.shape[1], observes.shape[2]-1 ))
-    colr = coll + 1
-    obs_dblstack = np.array([ observes[depth, rows, coll], observes[depth, rows, colr] ])
-    obs_pairs = np.zeros(( obs_dblstack.shape[1], obs_dblstack.shape[2], obs_dblstack.shape[3], obs_dblstack.shape[0] ))
-    depth, rows, coll, pairs = np.indices(obs_pairs.shape)
-    obs_pairs[depth, rows, coll, pairs] = obs_dblstack[pairs, depth, rows, coll]
-
-    depth, rows, coll = np.indices(( estimates.shape[0], estimates.shape[1], estimates.shape[2]-1 ))
-    colr = coll + 1
-    est_dblstack = np.array([ estimates[depth, rows, coll], estimates[depth, rows, colr] ])
-    est_pairs = np.zeros(( est_dblstack.shape[1], est_dblstack.shape[2], est_dblstack.shape[3], est_dblstack.shape[0] ))
-    depth, rows, coll, pairs = np.indices(est_pairs.shape)
-    est_pairs[depth, rows, coll, pairs] = est_dblstack[pairs, depth, rows, coll]
-
-    oe2e = (obs_pairs - est_pairs)**2 / est_pairs
-    chi_squares_lr = np.nan_to_num(np.nansum(np.nansum(oe2e, axis=3), axis=0))
-
-    # compute chi squares for up-down neighbours
-    depth, rowu, cols = np.indices(( observes.shape[0], observes.shape[1]-1, observes.shape[2] ))
-    rowd = rowu + 1
-    obs_dblstack = np.array([ observes[depth, rowu, cols], observes[depth, rowd, cols] ])
-    obs_pairs = np.zeros(( obs_dblstack.shape[1], obs_dblstack.shape[2], obs_dblstack.shape[3], obs_dblstack.shape[0] ))
-    depth, rowu, cols, pairs = np.indices(obs_pairs.shape)
-    obs_pairs[depth, rowu, cols, pairs] = obs_dblstack[pairs, depth, rowu, cols]
-
-    depth, rowu, cols = np.indices(( estimates.shape[0], estimates.shape[1]-1, estimates.shape[2] ))
-    rowd = rowu + 1
-    est_dblstack = np.array([ estimates[depth, rowu, cols], estimates[depth, rowd, cols] ])
-    est_pairs = np.zeros(( est_dblstack.shape[1], est_dblstack.shape[2], est_dblstack.shape[3], est_dblstack.shape[0] ))
-    depth, rowu, cols, pairs = np.indices(est_pairs.shape)
-    est_pairs[depth, rowu, cols, pairs] = est_dblstack[pairs, depth, rowu, cols]
-
-    oe2e = (obs_pairs - est_pairs)**2 / est_pairs
-    chi_squares_ud = np.nan_to_num(np.nansum(np.nansum(oe2e, axis=3), axis=0))
-
-    return (chi_squares_lr, chi_squares_ud)
+    return chi2lr, chi2ud
 
 
 def main(argv=None):
@@ -1391,7 +1368,7 @@ def main(argv=None):
     if len(argv) > 1:
         filename = argv[1]
     else:
-        filename = "adult"
+        filename = "zoo"
 
     data = Orange.data.Table(filename)
 

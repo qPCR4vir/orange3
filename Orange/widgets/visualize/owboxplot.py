@@ -16,11 +16,12 @@ from Orange.statistics import contingency, distribution
 from Orange.widgets import widget, gui
 from Orange.widgets.settings import (Setting, DomainContextHandler,
                                      ContextSetting)
-from Orange.widgets.utils import datacaching, colorpalette, vartype
-from Orange.widgets.io import FileFormat
+from Orange.widgets.utils import datacaching, vartype
 
 
 def compute_scale(min_, max_):
+    if min_ == max_:
+        return math.floor(min_), 1
     magnitude = int(3 * math.log10(abs(max_ - min_)) + 1)
     if magnitude % 3 == 0:
         first_place = 1
@@ -90,10 +91,9 @@ class OWBoxPlot(widget.OWWidget):
     display_changed call display_changed_disc that draws everything.
     """
     name = "Box Plot"
-    description = "Visualize distribution of feature values in a box plots."
+    description = "Visualize the distribution of feature values in a box plot."
     icon = "icons/BoxPlot.svg"
     priority = 100
-    author = "Amela Rakanović, Janez Demšar"
     inputs = [("Data", Orange.data.Table, "set_data")]
 
     #: Comparison types for continuous variables
@@ -136,7 +136,7 @@ class OWBoxPlot(widget.OWWidget):
     _label_font.setPixelSize(11)
     _attr_brush = QtGui.QBrush(QtGui.QColor(0x33, 0x00, 0xff))
 
-    want_graph = True
+    graph_name = "box_scene"
 
     def __init__(self):
         super().__init__()
@@ -159,7 +159,7 @@ class OWBoxPlot(widget.OWWidget):
         self.attr_list_box.setSizePolicy(QSizePolicy.Fixed,
                                          QSizePolicy.MinimumExpanding)
 
-        box = gui.widgetBox(self.controlArea, "Grouping")
+        box = gui.vBox(self.controlArea, "Grouping")
         self.group_list_box = gui.listBox(
             box, self, 'grouping_select', "grouping",
             callback=self.attr_changed,
@@ -168,7 +168,7 @@ class OWBoxPlot(widget.OWWidget):
                                           QSizePolicy.MinimumExpanding)
 
         # TODO: move Compare median/mean to grouping box
-        self.display_box = gui.widgetBox(self.controlArea, "Display")
+        self.display_box = gui.vBox(self.controlArea, "Display")
 
         gui.checkBox(self.display_box, self, "show_annotations", "Annotate",
                      callback=self.display_changed)
@@ -181,7 +181,7 @@ class OWBoxPlot(widget.OWWidget):
             self.controlArea, self, 'stretched', "Stretch bars", box='Display',
             callback=self.display_changed).box
 
-        gui.widgetBox(self.mainArea, addSpace=True)
+        gui.vBox(self.mainArea, addSpace=True)
         self.box_scene = QtGui.QGraphicsScene()
         self.box_view = QtGui.QGraphicsView(self.box_scene)
         self.box_view.setRenderHints(QtGui.QPainter.Antialiasing |
@@ -191,20 +191,14 @@ class OWBoxPlot(widget.OWWidget):
 
         self.mainArea.layout().addWidget(self.box_view)
 
-        e = gui.widgetBox(self.mainArea, addSpace=False, orientation=0)
+        e = gui.hBox(self.mainArea, addSpace=False)
         self.infot1 = gui.widgetLabel(e, "<center>No test results.</center>")
         self.mainArea.setMinimumWidth(650)
 
-        self.warning = gui.widgetBox(self.controlArea, "Warning:")
-        self.warning_info = gui.widgetLabel(self.warning, "")
-        self.warning.hide()
-
         self.stats = self.dist = self.conts = []
         self.is_continuous = False
-        self.disc_palette = colorpalette.ColorPaletteGenerator()
 
         self.update_display_box()
-        self.graphButton.clicked.connect(self.save_graph)
 
     def eventFilter(self, obj, event):
         if obj is self.box_view.viewport() and \
@@ -226,9 +220,11 @@ class OWBoxPlot(widget.OWWidget):
         self.attr_list_box.clear()
         self.group_list_box.clear()
         if dataset:
-            self.attributes = [(a.name, vartype(a)) for a in dataset.domain]
-            self.grouping = ["None"] + [(a.name, vartype(a))
-                                        for a in dataset.domain
+            domain = dataset.domain
+            self.attributes = [(a.name, vartype(a)) for a in domain.variables +
+                               domain.metas if a.is_primitive()]
+            self.grouping = ["None"] + [(a.name, vartype(a)) for a in
+                                        domain.variables + domain.metas
                                         if a.is_discrete]
             self.grouping_select = [0]
             self.attributes_select = [0]
@@ -253,33 +249,32 @@ class OWBoxPlot(widget.OWWidget):
         if self.is_continuous:
             heights = 90 if self.show_annotations else 60
             self.box_view.centerOn(self.scene_min_x + self.scene_width / 2,
-                                  -30 - len(self.stats) * heights / 2 + 45)
+                                   -30 - len(self.stats) * heights / 2 + 45)
         else:
             self.box_view.centerOn(self.scene_width / 2,
-                                  -30 - len(self.boxes) * 40 / 2 + 45)
+                                   -30 - len(self.boxes) * 40 / 2 + 45)
 
     def compute_box_data(self):
         dataset = self.dataset
         if dataset is None:
             self.stats = self.dist = self.conts = []
             return
-        attr_ind = self.attributes_select[0]
-        attr = dataset.domain[attr_ind]
+        attr = self.attributes[self.attributes_select[0]][0]
+        attr = dataset.domain[attr]
         self.is_continuous = attr.is_continuous
         group_by = self.grouping_select[0]
         if group_by:
-            group_attr = self.grouping[group_by][0]
-            group_ind = dataset.domain.index(group_attr)
+            group = self.grouping[group_by][0]
             self.dist = []
             self.conts = datacaching.getCached(
                 dataset, contingency.get_contingency,
-                (dataset, attr_ind, group_ind))
+                (dataset, attr, group))
             if self.is_continuous:
                 self.stats = [BoxData(cont) for cont in self.conts]
-            self.label_txts_all = dataset.domain[group_ind].values
+            self.label_txts_all = dataset.domain[group].values
         else:
             self.dist = datacaching.getCached(
-                dataset, distribution.get_distribution, (dataset, attr_ind))
+                dataset, distribution.get_distribution, (dataset, attr))
             self.conts = []
             if self.is_continuous:
                 self.stats = [BoxData(self.dist)]
@@ -393,10 +388,8 @@ class OWBoxPlot(widget.OWWidget):
 
         self.draw_axis_disc()
         if self.grouping_select[0]:
-            self.disc_palette.set_number_of_colors(len(self.conts[0]))
             self.boxes = [self.strudel(cont) for cont in self.conts]
         else:
-            self.disc_palette.set_number_of_colors(len(self.dist))
             self.boxes = [self.strudel(self.dist)]
 
         selected_grouping = self.grouping[self.grouping_select[0]][0]
@@ -421,7 +414,8 @@ class OWBoxPlot(widget.OWWidget):
                 self.box_scene.addItem(label)
 
             if selected_attribute != selected_grouping:
-                selected_attr = self.dataset.domain[self.attributes_select[0]]
+                attr = self.attributes[self.attributes_select[0]][0]
+                selected_attr = self.dataset.domain[attr]
                 for label_text, bar_part in zip(selected_attr.values,
                                                 box.childItems()):
                     label = QtGui.QGraphicsSimpleTextItem(label_text)
@@ -464,7 +458,6 @@ class OWBoxPlot(widget.OWWidget):
             p = 1 - scipy.special.fdtr(df_between, df_within, F)
             return F, p
 
-        self.warning.hide()
         if self.compare == OWBoxPlot.CompareNone or len(self.stats) < 2:
             t = ""
         elif any(s.N <= 1 for s in self.stats):
@@ -519,11 +512,11 @@ class OWBoxPlot(widget.OWWidget):
         top = max(stat.a_max for stat in self.stats)
 
         first_val, step = compute_scale(bottom, top)
-        while bottom < first_val:
+        while bottom <= first_val:
             first_val -= step
         bottom = first_val
         no_ticks = math.ceil((top - first_val) / step) + 1
-        top = max(top, first_val + (no_ticks - 1) * step)
+        top = max(top, first_val + no_ticks * step)
 
         gbottom = min(bottom, min(stat.mean - stat.dev for stat in self.stats))
         gtop = max(top, max(stat.mean + stat.dev for stat in self.stats))
@@ -577,7 +570,7 @@ class OWBoxPlot(widget.OWWidget):
                 self.scale_x = 1
                 return
             _, step = compute_scale(0, max_box)
-            step = int(step)
+            step = int(step) if step > 1 else 1
             steps = int(math.ceil(max_box / step))
         max_box = step * steps
 
@@ -703,15 +696,14 @@ class OWBoxPlot(widget.OWWidget):
         return box
 
     def strudel(self, dist):
-        attr_ind = self.attributes_select[0]
-        attr = self.dataset.domain[attr_ind]
+        attr = self.attributes[self.attributes_select[0]][0]
+        attr = self.dataset.domain[attr]
 
         ss = np.sum(dist)
         box = QtGui.QGraphicsItemGroup()
         if ss < 1e-6:
             QtGui.QGraphicsRectItem(0, -10, 1, 10, box)
         cum = 0
-        get_color = self.disc_palette.getRGB
         for i, v in enumerate(dist):
             if v < 1e-6:
                 continue
@@ -719,7 +711,7 @@ class OWBoxPlot(widget.OWWidget):
                 v /= ss
             v *= self.scale_x
             rect = QtGui.QGraphicsRectItem(cum + 1, -6, v - 2, 12, box)
-            rect.setBrush(QtGui.QBrush(QtGui.QColor(*get_color(i))))
+            rect.setBrush(QtGui.QBrush(QtGui.QColor(*attr.colors[i])))
             rect.setPen(QtGui.QPen(QtCore.Qt.NoPen))
             if self.stretched:
                 tooltip = "{}: {:.2f}%".format(attr.values[i],
@@ -784,12 +776,21 @@ class OWBoxPlot(widget.OWWidget):
             self.posthoc_lines.append(it)
             last_to = to
 
-    def save_graph(self):
-        from Orange.widgets.data.owsave import OWSave
+    def get_widget_name_extension(self):
+        if self.attributes_select and len(self.attributes):
+            return self.attributes[self.attributes_select[0]][0]
 
-        save_img = OWSave(data=self.box_scene,
-                          file_formats=FileFormat.img_writers)
-        save_img.exec_()
+    def send_report(self):
+        self.report_plot()
+        text = ""
+        if self.attributes_select and len(self.attributes):
+            text += "Box plot for attribute '{}' ".format(
+                self.attributes[self.attributes_select[0]][0])
+        if self.grouping_select and len(self.grouping):
+            text += "grouped by '{}'".format(
+                self.grouping[self.grouping_select[0]][0])
+        if text:
+            self.report_caption(text)
 
 
 def main(argv=None):

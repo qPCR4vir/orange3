@@ -1,16 +1,28 @@
+from collections import OrderedDict
 from itertools import chain
 
-from PyQt4 import QtGui, Qt, QtCore
+from PyQt4 import QtGui, QtCore
+from PyQt4.QtCore import Qt
 
 from Orange.data import (ContinuousVariable, DiscreteVariable, StringVariable,
-                         Table)
+                         Table, TimeVariable)
 import Orange.data.filter as data_filter
+from Orange.data.domain import filter_visible
 from Orange.data.sql.table import SqlTable
 from Orange.preprocess import Remove
 from Orange.widgets import widget, gui
-from Orange.widgets.settings import \
-    PerfectDomainContextHandler, Setting, ContextSetting
+from Orange.widgets.settings import Setting, ContextSetting, DomainContextHandler
 from Orange.widgets.utils import vartype
+from Orange.canvas import report
+
+
+class SelectRowsContextHandler(DomainContextHandler):
+    """Context handler that filters conditions"""
+
+    def is_valid_item(self, setting, condition, attrs, metas):
+        """Return True if condition applies to a variable in given domain."""
+        varname, *_ = condition
+        return varname in attrs or varname in metas
 
 
 class OWSelectRows(widget.OWWidget):
@@ -20,14 +32,12 @@ class OWSelectRows(widget.OWWidget):
     icon = "icons/SelectRows.svg"
     priority = 100
     category = "Data"
-    author = "Peter Juvan, Janez Demšar"
-    author_email = "janez.demsar(@at@)fri.uni-lj.si"
     inputs = [("Data", Table, "set_data")]
     outputs = [("Matching Data", Table, widget.Default), ("Unmatched Data", Table)]
 
     want_main_area = False
 
-    settingsHandler = PerfectDomainContextHandler()
+    settingsHandler = SelectRowsContextHandler()
     conditions = ContextSetting([])
     update_on_change = Setting(True)
     purge_attributes = Setting(True)
@@ -40,13 +50,14 @@ class OWSelectRows(widget.OWWidget):
                              "is greater than", "is at least",
                              "is between", "is outside",
                              "is defined"],
-        DiscreteVariable: ["is", "is not", "in", "is defined"],
+        DiscreteVariable: ["is", "is not", "is one of", "is defined"],
         StringVariable: ["equals", "is not",
                          "is before", "is equal or before",
                          "is after", "is equal or after",
                          "is between", "is outside", "contains",
                          "begins with", "ends with",
                          "is defined"]}
+    operator_names[TimeVariable] = operator_names[ContinuousVariable]
 
     def __init__(self):
         super().__init__()
@@ -56,12 +67,12 @@ class OWSelectRows(widget.OWWidget):
         self.conditions = []
         self.last_output_conditions = None
         self.data = None
+        self.data_desc = self.match_desc = self.nonmatch_desc = None
 
-        box = gui.widgetBox(self.controlArea, 'Conditions', stretch=100)
-        self.cond_list = QtGui.QTableWidget(box)
+        box = gui.vBox(self.controlArea, 'Conditions', stretch=100)
+        self.cond_list = QtGui.QTableWidget(
+            box, showGrid=False, selectionMode=QtGui.QTableWidget.NoSelection)
         box.layout().addWidget(self.cond_list)
-        self.cond_list.setShowGrid(False)
-        self.cond_list.setSelectionMode(QtGui.QTableWidget.NoSelection)
         self.cond_list.setColumnCount(3)
         self.cond_list.setRowCount(0)
         self.cond_list.verticalHeader().hide()
@@ -71,28 +82,27 @@ class OWSelectRows(widget.OWWidget):
             QtGui.QHeaderView.Stretch)
         self.cond_list.viewport().setBackgroundRole(QtGui.QPalette.Window)
 
-        box2 = gui.widgetBox(box, orientation="horizontal")
-        self.add_button = gui.button(box2, self, "Add condition",
-                                     callback=self.add_row)
-        self.add_all_button = gui.button(box2, self, "Add all variables",
-                                         callback=self.add_all)
-        self.remove_all_button = gui.button(box2, self, "Remove all",
-                                            callback=self.remove_all)
+        box2 = gui.hBox(box)
+        gui.rubber(box2)
+        self.add_button = gui.button(
+            box2, self, "Add Condition", callback=self.add_row)
+        self.add_all_button = gui.button(
+            box2, self, "Add All Variables", callback=self.add_all)
+        self.remove_all_button = gui.button(
+            box2, self, "Remove All", callback=self.remove_all)
         gui.rubber(box2)
 
-        info = gui.widgetBox(self.controlArea, '', orientation="horizontal")
-        box_data_in = gui.widgetBox(info, 'Data In')
-#        self.data_in_rows = gui.widgetLabel(box_data_in, " ")
-        self.data_in_variables = gui.widgetLabel(box_data_in, " ")
-        gui.rubber(box_data_in)
+        boxes = gui.widgetBox(self.controlArea, orientation=QtGui.QGridLayout())
+        layout = boxes.layout()
+        layout.setColumnStretch(0, 1)
+        layout.setColumnStretch(1, 1)
 
-        box_data_out = gui.widgetBox(info, 'Data Out')
-        self.data_out_rows = gui.widgetLabel(box_data_out, " ")
-#        self.dataOutAttributesLabel = gui.widgetLabel(box_data_out, " ")
-        gui.rubber(box_data_out)
+        box_data = gui.vBox(boxes, 'Data', addToLayout=False)
+        self.data_in_variables = gui.widgetLabel(box_data, " ")
+        self.data_out_rows = gui.widgetLabel(box_data, " ")
+        layout.addWidget(box_data, 0, 0)
 
-        box = gui.widgetBox(self.controlArea, orientation="horizontal")
-        box_setting = gui.widgetBox(box, 'Purging')
+        box_setting = gui.vBox(boxes, 'Purging', addToLayout=False)
         self.cb_pa = gui.checkBox(
             box_setting, self, "purge_attributes", "Remove unused features",
             callback=self.conditions_changed)
@@ -100,8 +110,17 @@ class OWSelectRows(widget.OWWidget):
         self.cb_pc = gui.checkBox(
             box_setting, self, "purge_classes", "Remove unused classes",
             callback=self.conditions_changed)
-        gui.auto_commit(box, self, "auto_commit", label="Commit",
-                        checkbox_label="Commit on change")
+        layout.addWidget(box_setting, 0, 1)
+
+        self.report_button.setFixedWidth(120)
+        gui.rubber(self.buttonsArea.layout())
+        layout.addWidget(self.buttonsArea, 1, 0)
+
+        acbox = gui.auto_commit(
+            None, self, "auto_commit", label="Send", orientation=Qt.Horizontal,
+            checkbox_label="Send automatically")
+        layout.addWidget(acbox, 1, 1)
+
         self.set_data(None)
         self.resize(600, 400)
 
@@ -114,7 +133,7 @@ class OWSelectRows(widget.OWWidget):
             minimumContentsLength=12,
             sizeAdjustPolicy=QtGui.QComboBox.AdjustToMinimumContentsLengthWithIcon)
         attr_combo.row = row
-        for var in chain(self.data.domain.variables, self.data.domain.metas):
+        for var in filter_visible(chain(self.data.domain.variables, self.data.domain.metas)):
             attr_combo.addItem(*gui.attributeItem(var))
         attr_combo.setCurrentIndex(attr or 0)
         self.cond_list.setCellWidget(row, 0, attr_combo)
@@ -209,13 +228,18 @@ class OWSelectRows(widget.OWWidget):
             le = gui.lineEdit(box, self, None)
             if contents:
                 le.setText(contents)
-            le.setAlignment(Qt.Qt.AlignRight)
+            le.setAlignment(QtCore.Qt.AlignRight)
             le.editingFinished.connect(self.conditions_changed)
             return le
 
         def add_numeric(contents):
             le = add_textual(contents)
             le.setValidator(OWSelectRows.QDoubleValidatorEmpty())
+            return le
+
+        def add_datetime(contents):
+            le = add_textual(contents)
+            le.setValidator(QtGui.QRegExpValidator(QtCore.QRegExp(TimeVariable.REGEX)))
             return le
 
         var = self.data.domain[oper_combo.attr_combo.currentText()]
@@ -232,7 +256,7 @@ class OWSelectRows(widget.OWWidget):
         if oper == oper_combo.count() - 1:
             self.cond_list.removeCellWidget(oper_combo.row, 2)
         elif var.is_discrete:
-            if oper_combo.currentText() == 'in':
+            if oper_combo.currentText() == "is one of":
                 if selected_values:
                     lc = [x for x in list(selected_values)]
                 button = DropDownToolButton(self, var, lc)
@@ -249,15 +273,15 @@ class OWSelectRows(widget.OWWidget):
                 self.cond_list.setCellWidget(oper_combo.row, 2, combo)
                 combo.currentIndexChanged.connect(self.conditions_changed)
         else:
-            box = gui.widgetBox(self, orientation="horizontal",
-                                addToLayout=False)
+            box = gui.hBox(self, addToLayout=False)
             box.var_type = vartype(var)
             self.cond_list.setCellWidget(oper_combo.row, 2, box)
             if var.is_continuous:
-                box.controls = [add_numeric(lc[0])]
+                validator = add_datetime if isinstance(var, TimeVariable) else add_numeric
+                box.controls = [validator(lc[0])]
                 if oper > 5:
                     gui.widgetLabel(box, " and ")
-                    box.controls.append(add_numeric(lc[1]))
+                    box.controls.append(validator(lc[1]))
                 gui.rubber(box)
             elif var.is_string:
                 box.controls = [add_textual(lc[0])]
@@ -280,8 +304,10 @@ class OWSelectRows(widget.OWWidget):
             data is None or
             len(data.domain.variables) + len(data.domain.metas) > 100)
         if not data:
+            self.data_desc = None
             self.commit()
             return
+        self.data_desc = report.describe_data_brief(data)
         self.conditions = []
         try:
             self.openContext(data)
@@ -290,10 +316,10 @@ class OWSelectRows(widget.OWWidget):
 
         if not self.conditions and len(data.domain.variables):
             self.add_row()
-        self.update_info(data, self.data_in_variables)
+        self.update_info(data, self.data_in_variables, "In: ")
         for attr, cond_type, cond_value in self.conditions:
             attrs = [a.name for a in
-                     data.domain.variables + data.domain.metas]
+                     filter_visible(chain(data.domain.variables, data.domain.metas))]
             if attr in attrs:
                 self.add_row(attrs.index(attr), cond_type, cond_value)
         self.unconditional_commit()
@@ -318,12 +344,22 @@ class OWSelectRows(widget.OWWidget):
     def commit(self):
         matching_output = self.data
         non_matching_output = None
+        self.error(21)
         if self.data:
             domain = self.data.domain
             conditions = []
             for attr_name, oper, values in self.conditions:
                 attr_index = domain.index(attr_name)
                 attr = domain[attr_index]
+
+                # Parse datetime strings into floats
+                if isinstance(attr, TimeVariable):
+                    try:
+                        values = [attr.parse(v) for v in values]
+                    except ValueError as e:
+                        self.error(21, e.args[0])
+                        return
+
                 if attr.is_continuous:
                     if any(not v for v in values):
                         continue
@@ -378,36 +414,93 @@ class OWSelectRows(widget.OWWidget):
         self.send("Matching Data", matching_output)
         self.send("Unmatched Data", non_matching_output)
 
-        self.update_info(matching_output, self.data_out_rows)
+        self.match_desc = report.describe_data_brief(matching_output)
+        self.nonmatch_desc = report.describe_data_brief(non_matching_output)
 
-    def update_info(self, data, lab1):
+        self.update_info(matching_output, self.data_out_rows, "Out: ")
+
+    def update_info(self, data, lab1, label):
         def sp(s, capitalize=True):
             return s and s or ("No" if capitalize else "no"), "s" * (s != 1)
 
         if data is None:
             lab1.setText("")
         else:
-            lab1.setText("~%s row%s, %s variable%s" % (sp(data.approx_len()) +
+            lab1.setText(label + "~%s row%s, %s variable%s" %
+                         (sp(data.approx_len()) +
             sp(len(data.domain.variables) + len(data.domain.metas))))
 
-    def sendReport(self):
-        self.reportSettings("Output", [("Remove unused values/attributes",
-                                        self.purge_attributes),
-                                       ("Remove unused classes",
-                                        self.purge_classes)])
-        text = "<table>\n<th>Attribute</th><th>Condition</th><th>Value</th>/n"
-        for i, cond in enumerate(self.conditions):
-            if cond.type == "OR":
-                text += "<tr><td span=3>\"OR\"</td></tr>\n"
-            else:
-                text += "<tr><td>%s</td><td>%s</td><td>%s</td></tr>\n" % \
-                        (cond.varName, repr(cond.operator), cond.val1)
+    def send_report(self):
+        if not self.data:
+            self.report_paragraph("No data.")
+            return
 
-        text += "</table>"
-        import OWReport
-        self.reportSection("Conditions")
-        self.reportRaw(OWReport.reportTable(self.cond_list))
-#        self.reportTable("Conditions", self.criteriaTable)
+        pdesc = None
+        describe_domain = False
+        for d in (self.data_desc, self.match_desc, self.nonmatch_desc):
+            if not d or not d["Data instances"]:
+                continue
+            ndesc = d.copy()
+            del ndesc["Data instances"]
+            if pdesc is not None and pdesc != ndesc:
+                describe_domain = True
+            pdesc = ndesc
+
+        conditions = []
+        domain = self.data.domain
+        for attr_name, oper, values in self.conditions:
+            attr_index = domain.index(attr_name)
+            attr = domain[attr_index]
+            names = self.operator_names[type(attr)]
+            name = names[oper]
+            if oper == len(names) - 1:
+                conditions.append("{} {}".format(attr, name))
+            elif attr.is_discrete:
+                if name == "is one of":
+                    if len(values) == 1:
+                        conditions.append("{} is {}".format(
+                            attr, attr.values[values[0] - 1]))
+                    elif len(values) > 1:
+                        conditions.append("{} is {} or {}".format(
+                            attr,
+                            ", ".join(attr.values[v - 1] for v in values[:-1]),
+                            attr.values[values[-1] - 1]))
+                else:
+                    if not (values and values[0]):
+                        continue
+                    value = values[0] - 1
+                    conditions.append("{} {} {}".
+                                      format(attr, name, attr.values[value]))
+            else:
+                if len(values) == 1:
+                    conditions.append("{} {} {}".
+                                      format(attr, name, *values))
+                else:
+                    conditions.append("{} {} {} and {}".
+                                      format(attr, name, *values))
+        items = OrderedDict()
+        if describe_domain:
+            items.update(self.data_desc)
+        else:
+            items["Instances"] = self.data_desc["Data instances"]
+        items["Condition"] = " AND ".join(conditions) or "no conditions"
+        self.report_items("Data", items)
+        if describe_domain:
+            self.report_items("Matching data", self.match_desc)
+            self.report_items("Non-matching data", self.nonmatch_desc)
+        else:
+            match_inst = \
+                bool(self.match_desc) and \
+                self.match_desc["Data instances"]
+            nonmatch_inst = \
+                bool(self.nonmatch_desc) and \
+                self.nonmatch_desc["Data instances"]
+            self.report_items(
+                "Output",
+                (("Matching data",
+                  "{} instances".format(match_inst) if match_inst else "None"),
+                 ("Non-matching data",
+                  nonmatch_inst > 0 and "{} instances".format(nonmatch_inst))))
 
 
 class CheckBoxPopup(QtGui.QWidget):

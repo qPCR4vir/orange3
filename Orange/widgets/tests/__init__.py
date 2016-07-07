@@ -1,13 +1,28 @@
+import os
 import unittest
+import Orange.widgets
 
-from Orange.widgets.tests.test_setting_provider import *
-from Orange.widgets.tests.test_settings_handler import *
-from Orange.widgets.tests.test_context_handler import *
 
-from Orange.widgets.tests.test_class_values_context_handler import *
-from Orange.widgets.tests.test_domain_context_handler import *
-from Orange.widgets.tests.test_owselectcolumns import *
-from Orange.widgets.tests.test_scatterplot_density import *
+def load_tests(loader, tests, pattern):
+    # Need to guard against inf. recursion. This package will be found again
+    # within the discovery process.
+    if getattr(load_tests, "_in_load_tests", False):
+        return unittest.TestSuite([])
 
-class Test(unittest.TestCase):
-    pass
+    widgets_dir = os.path.dirname(Orange.widgets.__file__)
+    top_level_dir = os.path.dirname(os.path.dirname(Orange.__file__))
+
+    if loader is None:
+        loader = unittest.TestLoader()
+    if pattern is None:
+        pattern = 'test*.py'
+
+    load_tests._in_load_tests = True
+    try:
+        all_tests = [
+            loader.discover(widgets_dir, pattern, top_level_dir)
+        ]
+    finally:
+        load_tests._in_load_tests = False
+
+    return unittest.TestSuite(all_tests)

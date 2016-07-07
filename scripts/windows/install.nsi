@@ -96,8 +96,13 @@ Section ""
 
 	${ExtractTemp} "${BASEDIR}\requirements.txt" ${TEMPDIR}\
 
+	# Update pip to minimum required version (pip>=6)
+	DetailPrint "Updating pip"
+	${PythonExec} '-m pip install --no-index -f "${TEMPDIR}\wheelhouse" -U pip'
+
 	DetailPrint "Installing scipy stack ($SSE)"
 	${Pip} 'install --no-deps --no-index \
+			-f "${TEMPDIR}\wheelhouse" \
 			-f "${TEMPDIR}\wheelhouse\$SSE" numpy scipy'
 	Pop $0
 	${If} $0 != 0
@@ -125,7 +130,7 @@ Section ""
 
 	DetailPrint "Installing Orange"
 	${Pip} 'install --no-deps --no-index \
-			-f "${TEMPDIR}\wheelhouse" Orange'
+			-f "${TEMPDIR}\wheelhouse" Orange3'
 
 	Pop $0
 	${If} $0 != 0
@@ -191,7 +196,7 @@ Section Uninstall
 
 	ReadRegStr $PythonDir SHELL_CONTEXT Software\OrangeCanvas\Current "PythonDir"
 
-	${PythonExec} "-m pip uninstall -y Orange"
+	${PythonExec} "-m pip uninstall -y Orange3"
 
 	RmDir /R $PythonDir\share\Orange
 

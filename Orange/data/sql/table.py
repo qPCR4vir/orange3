@@ -1,11 +1,13 @@
 """
 Support for example tables wrapping data stored on a PostgreSQL server.
 """
+from contextlib import contextmanager
 import functools
+from itertools import islice
+import logging
 import re
 import threading
-from contextlib import contextmanager
-from itertools import islice
+from time import time, strftime
 
 import numpy as np
 
@@ -17,9 +19,12 @@ from .. import domain, variable, table, instance, filter,\
     DiscreteVariable, ContinuousVariable, StringVariable
 from Orange.data.sql import filter as sql_filter
 
+
 LARGE_TABLE = 100000
 AUTO_DL_LIMIT = 10000
 DEFAULT_SAMPLE_TIME = 1
+sql_log = logging.getLogger('sql_log')
+sql_log.debug("Logging started: {}".format(strftime("%Y-%m-%d %H:%M:%S")))
 
 
 class SqlTable(table.Table):
@@ -196,7 +201,7 @@ class SqlTable(table.Table):
                 var = self.domain[col_idx]
                 return variable.Value(
                     var,
-                    self._query(self.table_name, var, rows=[row_idx])
+                    next(self._query([var], rows=[row_idx]))[0]
                 )
             except TypeError:
                 pass
@@ -221,8 +226,11 @@ class SqlTable(table.Table):
     def _fetch_row(self, row_index):
         attributes = self.domain.variables + self.domain.metas
         rows = [row_index]
-        values = list(self._query(attributes, rows=rows))[0]
-        return SqlRowInstance(self.domain, values)
+        values = list(self._query(attributes, rows=rows))
+        if not values:
+            raise IndexError('Could not retrieve row {} from table {}'.format(
+                row_index, self.name))
+        return SqlRowInstance(self.domain, values[0])
 
     def __iter__(self):
         """ Iterating through the rows executes the query using a cursor and
@@ -525,7 +533,7 @@ class SqlTable(table.Table):
     def _filter_is_defined(self, columns=None, negate=False):
         if columns is None:
             columns = range(len(self.domain.variables))
-        columns = [self.domain.variables[i].to_sql() for i in columns]
+        columns = [self.domain[i].to_sql() for i in columns]
 
         t2 = self.copy()
         t2.row_filters += (sql_filter.IsDefinedSql(columns, negate),)
@@ -687,6 +695,9 @@ class SqlTable(table.Table):
 
         sampled_table = self.copy()
         sampled_table.table_name = self.quote_identifier(sample_table)
+        with sampled_table._execute_sql_query(
+                'ANALYZE {}'.format(sampled_table.table_name)):
+            pass
         return sampled_table
 
     @contextmanager
@@ -694,8 +705,12 @@ class SqlTable(table.Table):
         connection = self.connection_pool.getconn()
         cur = connection.cursor()
         try:
+            utfquery = cur.mogrify(query, param).decode('utf-8')
+            sql_log.debug("Executing: {}".format(utfquery))
+            t = time()
             cur.execute(query, param)
             yield cur
+            sql_log.info("{:.2f} ms: {}".format(1000 * (time() - t), utfquery))
         finally:
             connection.commit()
             self.connection_pool.putconn(connection)

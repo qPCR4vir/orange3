@@ -9,6 +9,7 @@ from collections import OrderedDict, namedtuple
 from math import isnan
 
 import numpy
+from scipy.sparse import issparse
 
 from PyQt4 import QtCore
 from PyQt4 import QtGui
@@ -27,8 +28,7 @@ from Orange.statistics import basic_stats
 from Orange.widgets import widget, gui
 from Orange.widgets.settings import (Setting, ContextSetting,
                                      DomainContextHandler)
-from Orange.widgets.utils import colorpalette, datacaching
-from Orange.widgets.utils import itemmodels
+from Orange.widgets.utils import datacaching
 from Orange.widgets.utils.itemmodels import TableModel
 
 
@@ -60,7 +60,7 @@ class RichTableDecorator(QIdentityProxyModel):
 
     def setSourceModel(self, source):
         if source is not None and \
-                not isinstance(source, itemmodels.TableModel):
+                not isinstance(source, TableModel):
             raise TypeError()
 
         if source is not None:
@@ -69,7 +69,8 @@ class RichTableDecorator(QIdentityProxyModel):
             for var in source.vars:
                 if isinstance(var, Orange.data.Variable):
                     labels.extend(var.attributes.keys())
-            self._labels = list(sorted(set(labels)))
+            self._labels = list(sorted(
+                {label for label in labels if not label.startswith("_")}))
         else:
             self._continuous = []
             self._labels = []
@@ -353,9 +354,11 @@ TableSlot = namedtuple("TableSlot", ["input_id", "table", "summary", "view"])
 
 class OWDataTable(widget.OWWidget):
     name = "Data Table"
-    description = "View data set in a spreadsheet."
+    description = "View the data set in a spreadsheet."
     icon = "icons/Table.svg"
-    priority = 100
+    priority = 10
+
+    buttons_area_orientation = Qt.Vertical
 
     inputs = [("Data", Table, "set_dataset", widget.Multiple)]
     outputs = [("Selected Data", Table, widget.Default),
@@ -367,8 +370,6 @@ class OWDataTable(widget.OWWidget):
     select_rows = Setting(True)
     auto_commit = Setting(True)
 
-    color_settings = Setting(None)
-    selected_schema_index = Setting(0)
     color_by_class = Setting(True)
     settingsHandler = DomainContextHandler(
         match_values=DomainContextHandler.MATCH_VALUES_ALL)
@@ -382,7 +383,7 @@ class OWDataTable(widget.OWWidget):
 
         self.dist_color = QtGui.QColor(*self.dist_color_RGB)
 
-        info_box = gui.widgetBox(self.controlArea, "Info")
+        info_box = gui.vBox(self.controlArea, "Info")
         self.info_ex = gui.widgetLabel(info_box, 'No data on input.', )
         self.info_ex.setWordWrap(True)
         self.info_attr = gui.widgetLabel(info_box, ' ')
@@ -391,16 +392,10 @@ class OWDataTable(widget.OWWidget):
         self.info_class.setWordWrap(True)
         self.info_meta = gui.widgetLabel(info_box, ' ')
         self.info_meta.setWordWrap(True)
-
-        gui.separator(info_box)
-        gui.button(info_box, self, "Restore Original Order",
-                   callback=self.restore_order,
-                   tooltip="Show rows in the original order",
-                   autoDefault=False)
         info_box.setMinimumWidth(200)
         gui.separator(self.controlArea)
 
-        box = gui.widgetBox(self.controlArea, "Variables")
+        box = gui.vBox(self.controlArea, "Variables")
         self.c_show_attribute_labels = gui.checkBox(
             box, self, "show_attribute_labels",
             "Show variable labels (if present)",
@@ -411,21 +406,20 @@ class OWDataTable(widget.OWWidget):
                      callback=self._on_distribution_color_changed)
         gui.checkBox(box, self, "color_by_class", 'Color by instance classes',
                      callback=self._on_distribution_color_changed)
-        gui.button(box, self, "Set colors", self.set_colors, autoDefault=False,
-                   tooltip="Set the background color and color palette")
 
-        box = gui.widgetBox(self.controlArea, "Selection")
+        box = gui.vBox(self.controlArea, "Selection")
 
         gui.checkBox(box, self, "select_rows", "Select full rows",
                      callback=self._on_select_rows_changed)
 
         gui.rubber(self.controlArea)
 
-        gui.auto_commit(self.controlArea, self, "auto_commit",
-                        "Send Selected Rows", "Auto send is on")
-
-        dlg = self.create_color_dialog()
-        self.discPalette = dlg.getDiscretePalette("discPalette")
+        reset = gui.button(
+            None, self, "Restore Original Order", callback=self.restore_order,
+            tooltip="Show rows in the original order", autoDefault=False)
+        self.buttonsArea.layout().insertWidget(0, reset)
+        gui.auto_commit(self.buttonsArea, self, "auto_commit",
+                        "Send Selected Rows", "Send Automatically")
 
         # GUI with tabs
         self.tabs = gui.tabWidget(self.mainArea)
@@ -437,29 +431,6 @@ class OWDataTable(widget.OWWidget):
 
     def sizeHint(self):
         return QtCore.QSize(800, 500)
-
-    def create_color_dialog(self):
-        c = colorpalette.ColorPaletteDlg(self, "Color Palette")
-        c.createDiscretePalette("discPalette", "Discrete Palette")
-        box = c.createBox("otherColors", "Other Colors")
-        c.createColorButton(box, "Default", "Default color",
-                            QtGui.QColor(self.dist_color))
-        c.setColorSchemas(self.color_settings, self.selected_schema_index)
-        return c
-
-    def set_colors(self):
-        dlg = self.create_color_dialog()
-        if dlg.exec():
-            self.color_settings = dlg.getColorSchemas()
-            self.selected_schema_index = dlg.selectedSchemaIndex
-            self.discPalette = dlg.getDiscretePalette("discPalette")
-            self.dist_color = QtGui.QColor(dlg.getColor("Default"))
-            self.dist_color_RGB = (
-                self.dist_color.red(), self.dist_color.green(),
-                self.dist_color.blue(), self.dist_color.alpha()
-            )
-            if self.show_distributions:
-                self._on_distribution_color_changed()
 
     def set_dataset(self, data, tid=None):
         """Set the input dataset."""
@@ -543,7 +514,11 @@ class OWDataTable(widget.OWWidget):
 
         rowcount = data.approx_len()
 
-        color_schema = self.discPalette if self.color_by_class else None
+        if self.color_by_class and data.domain.has_discrete_class:
+            color_schema = [
+                QtGui.QColor(*c) for c in data.domain.class_var.colors]
+        else:
+            color_schema = None
         if self.show_distributions:
             view.setItemDelegate(
                 gui.TableBarItem(
@@ -610,7 +585,7 @@ class OWDataTable(widget.OWWidget):
                             # paint by hand (borrowed from QTableCornerButton)
                             btn = o
                             opt = QtGui.QStyleOptionHeader()
-                            opt.init(btn)
+                            opt.initFrom(btn)
                             state = QtGui.QStyle.State_None
                             if btn.isEnabled():
                                 state |= QtGui.QStyle.State_Enabled
@@ -673,7 +648,8 @@ class OWDataTable(widget.OWWidget):
             labelnames = set()
             for a in model.source.domain:
                 labelnames.update(a.attributes.keys())
-            labelnames = sorted(list(labelnames))
+            labelnames = sorted(
+                [label for label in labelnames if not label.startswith("_")])
             self.set_corner_text(view, "\n".join([""] + labelnames))
         else:
             model.setRichHeaderFlags(RichTableDecorator.Name)
@@ -686,13 +662,22 @@ class OWDataTable(widget.OWWidget):
 
     def _on_distribution_color_changed(self):
         for ti in range(self.tabs.count()):
-            color_schema = self.discPalette if self.color_by_class else None
+            widget = self.tabs.widget(ti)
+            model = widget.model()
+            while isinstance(model, QtGui.QAbstractProxyModel):
+                model = model.sourceModel()
+            data = model.source
+            class_var = data.domain.class_var
+            if self.color_by_class and class_var and class_var.is_discrete:
+                color_schema = [QtGui.QColor(*c) for c in class_var.colors]
+            else:
+                color_schema = None
             if self.show_distributions:
                 delegate = gui.TableBarItem(self, color=self.dist_color,
                                             color_schema=color_schema)
             else:
                 delegate = QtGui.QStyledItemDelegate(self)
-            self.tabs.widget(ti).setItemDelegate(delegate)
+            widget.setItemDelegate(delegate)
         tab = self.tabs.currentWidget()
         if tab:
             tab.reset()
@@ -744,15 +729,25 @@ class OWDataTable(widget.OWWidget):
     def set_selection(self):
         if len(self.selected_rows) and len(self.selected_cols):
             view = self.tabs.currentWidget()
+            model = view.model()
+            if model.rowCount() <= self.selected_rows[-1] or \
+                    model.columnCount() <= self.selected_cols[-1]:
+                return
+
             selection = QItemSelection()
-            temp_selection = QItemSelection()
-            for row in self.selected_rows:
-                for col in self.selected_cols:
-                    index = view.model().index(row, col)
-                    temp_selection.select(index, index)
-                    selection.merge(temp_selection, QItemSelectionModel.Select)
-            view.selectionModel().select(selection,
-                                         QItemSelectionModel.ClearAndSelect)
+            rowranges = list(ranges(self.selected_rows))
+            colranges = list(ranges(self.selected_cols))
+
+            for rowstart, rowend in rowranges:
+                for colstart, colend in colranges:
+                    selection.append(
+                        QtGui.QItemSelectionRange(
+                            view.model().index(rowstart, colstart),
+                            view.model().index(rowend - 1, colend - 1)
+                        )
+                    )
+            view.selectionModel().select(
+                selection, QItemSelectionModel.ClearAndSelect)
 
     def get_selection(self, view):
         """
@@ -775,6 +770,13 @@ class OWDataTable(widget.OWWidget):
         cols = sorted(set(ind.column() for ind in indexes))
         return rows, cols
 
+    @staticmethod
+    def _get_model(view):
+        model = view.model()
+        while isinstance(model, QtGui.QAbstractProxyModel):
+            model = model.sourceModel()
+        return model
+
     def commit(self):
         """
         Commit/send the current selected row/column selection.
@@ -782,10 +784,7 @@ class OWDataTable(widget.OWWidget):
         selected_data = other_data = None
         view = self.tabs.currentWidget()
         if view and view.model() is not None:
-            model = view.model()
-            while isinstance(model, QtGui.QAbstractProxyModel):
-                model = model.sourceModel()
-
+            model = self._get_model(view)
             table = model.source  # The input data table
 
             # Selections of individual instances are not implemented
@@ -817,7 +816,7 @@ class OWDataTable(widget.OWWidget):
 
             if len(colsel) < len(domain) + len(domain.metas):
                 # only a subset of the columns is selected
-                allvars = domain.variables + domain.metas
+                allvars = domain.class_vars + domain.metas + domain.attributes
                 columns = [(c, model.headerData(c, Qt.Horizontal,
                                                 TableModel.DomainRole))
                            for c in colsel]
@@ -828,6 +827,9 @@ class OWDataTable(widget.OWWidget):
                     return [allvars[c] for c, r in columns if r == role]
 
                 attrs = select_vars(TableModel.Attribute)
+                if attrs and issparse(table.X):
+                    # for sparse data you can only select all attributes
+                    attrs = table.domain.attributes
                 class_vars = select_vars(TableModel.ClassVar)
                 metas = select_vars(TableModel.Meta)
                 domain = Orange.data.Domain(attrs, class_vars, metas)
@@ -859,6 +861,14 @@ class OWDataTable(widget.OWWidget):
             QtGui.QApplication.clipboard().setMimeData(
                 mime, QtGui.QClipboard.Clipboard
             )
+
+    def send_report(self):
+        view = self.tabs.currentWidget()
+        if not view or not view.model():
+            return
+        model = self._get_model(view)
+        self.report_data_brief(model.source)
+        self.report_table(view)
 
 # Table Summary
 

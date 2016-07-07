@@ -1,46 +1,67 @@
 import os
 import unittest
+import tempfile
+from contextlib import contextmanager
 
-from Orange.widgets.tests import test_setting_provider, \
-    test_settings_handler, test_context_handler, \
-    test_class_values_context_handler, test_domain_context_handler, \
-    test_owselectcolumns, test_scatterplot_density, test_widgets_outputs
-from Orange.widgets.data import owimpute
-
-try:
-    from Orange.widgets.tests import test_widget
-
-    run_widget_tests = True
-except ImportError:
-    run_widget_tests = False
+import Orange
 
 
-def suite():
+@contextmanager
+def named_file(content, encoding=None):
+    file = tempfile.NamedTemporaryFile("wt", delete=False, encoding=encoding)
+    file.write(content)
+    name = file.name
+    file.close()
+    try:
+        yield name
+    finally:
+        os.remove(name)
+
+
+def test_dirname():
+    """
+    Return the absolute path to the Orange.tests package.
+
+    Returns
+    -------
+    path : str
+    """
+    return os.path.dirname(__file__)
+
+
+def test_filename(path):
+    """
+    Return an absolute path to a resource within Orange.tests package.
+
+    Parameters
+    ----------
+    path : str
+        Path relative to `test_dirname()`
+    Returns
+    -------
+    abspath : str
+        Absolute path
+    """
+    return os.path.join(test_dirname(), path)
+
+
+def suite(loader=None, pattern='test*.py'):
     test_dir = os.path.dirname(__file__)
+    if loader is None:
+        loader = unittest.TestLoader()
+    if pattern is None:
+        pattern = 'test*.py'
+    top_level_dir = os.path.dirname(os.path.dirname(Orange.__file__))
     all_tests = [
-        unittest.TestLoader().discover(test_dir),
+        loader.discover(test_dir, pattern, top_level_dir),
     ]
-    load = unittest.TestLoader().loadTestsFromModule
-    all_tests.extend([
-        load(test_setting_provider),
-        load(test_settings_handler),
-        load(test_context_handler),
 
-        load(test_class_values_context_handler),
-        load(test_domain_context_handler),
-        load(test_owselectcolumns),
-        load(test_scatterplot_density),
-        load(test_widgets_outputs),
-        load(owimpute)
-    ])
-    if run_widget_tests:
-        all_tests.extend([
-            #load(test_widget), # does not run on travis
-        ])
     return unittest.TestSuite(all_tests)
 
 
-test_suite = suite()
+def load_tests(loader, tests, pattern):
+    return suite(loader, pattern)
+
 
 if __name__ == '__main__':
     unittest.main(defaultTest='suite')

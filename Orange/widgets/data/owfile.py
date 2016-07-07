@@ -1,13 +1,26 @@
 import os
-import sys
-import urllib
+from itertools import chain, count
+from warnings import catch_warnings
 
+import numpy as np
 from PyQt4 import QtGui, QtCore
-from Orange.widgets import widget, gui
-from Orange.widgets.settings import Setting
+from PyQt4.QtGui import QSizePolicy as Policy
+
+from Orange.canvas.gui.utils import OSX_NSURL_toLocalFile
+from Orange.data import Domain, DiscreteVariable, StringVariable
 from Orange.data.table import Table, get_sample_datasets_dir
-from Orange.data.io import FileFormat
-from Orange.widgets.widget import OutputSignal
+from Orange.data.io import FileFormat, UrlReader
+from Orange.widgets import widget, gui
+from Orange.widgets.settings import Setting, ContextHandler, ContextSetting, \
+    PerfectDomainContextHandler
+from Orange.widgets.utils.domaineditor import DomainEditor
+from Orange.widgets.utils.itemmodels import PyListModel
+from Orange.widgets.utils.filedialogs import RecentPathsWComboMixin
+
+# Backward compatibility: class RecentPath used to be defined in this module,
+# and it is used in saved (pickled) settings. It must be imported into the
+# module's namespace so that old saved settings still work
+from Orange.widgets.utils.filedialogs import RecentPath
 
 
 def add_origin(examples, filename):
@@ -20,149 +33,74 @@ def add_origin(examples, filename):
             var.attributes["origin"] = dir_name
 
 
-class RecentPath:
-    abspath = ''
-    prefix = None   #: Option[str]  # BASEDIR | SAMPLE-DATASETS | ...
-    relpath = ''  #: Option[str]  # path relative to `prefix`
-    title = ''    #: Option[str]  # title of filename (e.g. from URL)
+class NamedURLModel(PyListModel):
+    def __init__(self, mapping):
+        self.mapping = mapping
+        super().__init__()
 
-    def __init__(self, abspath, prefix, relpath, title=''):
-        if os.name == "nt":
-            # always use a cross-platform pathname component separator
-            abspath = abspath.replace(os.path.sep, "/")
-            if relpath is not None:
-                relpath = relpath.replace(os.path.sep, "/")
-        self.abspath = abspath
-        self.prefix = prefix
-        self.relpath = relpath
-        self.title = title
+    def data(self, index, role):
+        data = super().data(index, role)
+        if role == QtCore.Qt.DisplayRole:
+            return self.mapping.get(data, data)
+        return data
 
-    def __eq__(self, other):
-        return (self.abspath == other.abspath or
-                self.prefix == other.prefix and
-                self.relpath == other.relpath)
-
-    @staticmethod
-    def create(path, searchpaths):
-        """
-        Create a RecentPath item inferring a suitable prefix name and relpath.
-
-        Parameters
-        ----------
-        path : str
-            File system path.
-        searchpaths : List[Tuple[str, str]]
-            A sequence of (NAME, prefix) pairs. The sequence is searched
-            for a item such that prefix/relpath == abspath. The NAME is
-            recorded in the `prefix` and relpath in `relpath`.
-            (note: the first matching prefixed path is chosen).
-
-        """
-        def isprefixed(prefix, path):
-            """
-            Is `path` contained within the directory `prefix`.
-
-            >>> isprefixed("/usr/local/", "/usr/local/shared")
-            True
-            """
-            normalize = lambda path: os.path.normcase(os.path.normpath(path))
-            prefix, path = normalize(prefix), normalize(path)
-            if not prefix.endswith(os.path.sep):
-                prefix = prefix + os.path.sep
-            return os.path.commonprefix([prefix, path]) == prefix
-
-        abspath = os.path.normpath(os.path.abspath(path))
-        for prefix, base in searchpaths:
-            if isprefixed(base, abspath):
-                relpath = os.path.relpath(abspath, base)
-                return RecentPath(abspath, prefix, relpath)
-
-        return RecentPath(abspath, None, None)
-
-    def search(self, searchpaths):
-        """
-        Return a file system path, substituting the variable paths if required
-
-        If the self.abspath names an existing path it is returned. Else if
-        the `self.prefix` and `self.relpath` are not `None` then the
-        `searchpaths` sequence is searched for the matching prefix and
-        if found and the {PATH}/self.relpath exists it is returned.
-
-        If all fails return None.
-
-        Parameters
-        ----------
-        searchpaths : List[Tuple[str, str]]
-            A sequence of (NAME, prefixpath) pairs.
-
-        """
-        if os.path.exists(self.abspath):
-            return os.path.normpath(self.abspath)
-
-        for prefix, base in searchpaths:
-            if self.prefix == prefix:
-                path = os.path.join(base, self.relpath)
-                if os.path.exists(path):
-                    return os.path.normpath(path)
-        else:
-            return None
-
-    def resolve(self, searchpaths):
-        if self.prefix is None and os.path.exists(self.abspath):
-            return self
-        elif self.prefix is not None:
-            for prefix, base in searchpaths:
-                if self.prefix == prefix:
-                    path = os.path.join(base, self.relpath)
-                    if os.path.exists(path):
-                        return RecentPath(
-                            os.path.normpath(path), self.prefix, self.relpath)
-        return None
-
-    @property
-    def value(self):
-        if self.prefix == "url-datasets":
-            return '{} ({})'.format(self.title, self.abspath)
-        return os.path.basename(self.abspath)
-
-    @property
-    def icon(self):
-        provider = QtGui.QFileIconProvider()
-        if self.prefix == "url-datasets":
-            return provider.icon(QtGui.QFileIconProvider.Network)
-        return provider.icon(QtGui.QFileIconProvider.Drive)
-
-    @property
-    def dirname(self):
-        return os.path.dirname(self.abspath)
+    def add_name(self, url, name):
+        self.mapping[url] = name
+        self.modelReset.emit()
 
 
-class OWFile(widget.OWWidget):
+class XlsContextHandler(ContextHandler):
+    def new_context(self, filename, sheet):
+        context = super().new_context()
+        context.filename = filename
+        return context
+
+    # noinspection PyMethodOverriding
+    def match(self, context, filename, sheets):
+        context_sheet = context.values.get("xls_sheet")
+        if context.filename == filename and context_sheet in sheets:
+            return ContextHandler.PERFECT_MATCH
+        if context_sheet in sheets:
+            return 1
+        return ContextHandler.NO_MATCH
+
+
+class OWFile(widget.OWWidget, RecentPathsWComboMixin):
     name = "File"
     id = "orange.widgets.data.file"
-    description = "Read a data from an input file " \
+    description = "Read a data from an input file or network " \
                   "and send the data table to the output."
     icon = "icons/File.svg"
-    author = "Janez Demsar"
-    maintainer_email = "janez.demsar(@at@)fri.uni-lj.si"
     priority = 10
     category = "Data"
     keywords = ["data", "file", "load", "read"]
-    outputs = [OutputSignal(
+    outputs = [widget.OutputSignal(
         "Data", Table,
         doc="Attribute-valued data set read from the input file.")]
 
     want_main_area = False
-    resizing_enabled = False
 
-    #: back-compatibility: List[str] saved files list
-    recent_files = Setting([])
-    #: List[RecentPath]
-    recent_paths = Setting([])
+    SEARCH_PATHS = [("sample-datasets", get_sample_datasets_dir())]
 
-    new_variables = Setting(False)
+    LOCAL_FILE, URL = range(2)
 
-    dlgFormats = (
+    settingsHandler = PerfectDomainContextHandler()
+
+    # Overload RecentPathsWidgetMixin.recent_paths to set defaults
+    recent_paths = Setting([
+        RecentPath("", "sample-datasets", "iris.tab"),
+        RecentPath("", "sample-datasets", "titanic.tab"),
+        RecentPath("", "sample-datasets", "housing.tab"),
+    ])
+    recent_urls = Setting([])
+    source = Setting(LOCAL_FILE)
+    xls_sheet = ContextSetting("")
+    sheet_names = Setting({})
+    url = Setting("")
+
+    variables = ContextSetting([])
+
+    dlg_formats = (
         "All readable files ({});;".format(
             '*' + ' *'.join(FileFormat.readers.keys())) +
         ";;".join("{} (*{})".format(f.DESCRIPTION, ' *'.join(f.EXTENSIONS))
@@ -171,294 +109,338 @@ class OWFile(widget.OWWidget):
 
     def __init__(self):
         super().__init__()
+        RecentPathsWComboMixin.__init__(self)
         self.domain = None
-
+        self.data = None
         self.loaded_file = ""
-        self._relocate_recent_files()
+        self.reader = None
 
-        vbox = gui.widgetBox(self.controlArea, "Data File / URL",
-                             addSpace=True)
-        box = gui.widgetBox(vbox, orientation=0)
-        self.file_combo = QtGui.QComboBox(box, sizeAdjustPolicy=QtGui.QComboBox.AdjustToContents)
-        self.file_combo.setMinimumWidth(300)
-        self.file_combo.setEditable(True)
-        self.file_combo.lineEdit().setStyleSheet("padding-left: 1px;")
-        box.layout().addWidget(self.file_combo)
+        layout = QtGui.QGridLayout()
+        gui.widgetBox(self.controlArea, margin=0, orientation=layout)
+        vbox = gui.radioButtons(None, self, "source", box=True, addSpace=True,
+                                callback=self.load_data, addToLayout=False)
+
+        rb_button = gui.appendRadioButton(vbox, "File:", addToLayout=False)
+        layout.addWidget(rb_button, 0, 0, QtCore.Qt.AlignVCenter)
+
+        box = gui.hBox(None, addToLayout=False, margin=0)
+        box.setSizePolicy(Policy.MinimumExpanding, Policy.Fixed)
+        self.file_combo.setSizePolicy(Policy.MinimumExpanding, Policy.Fixed)
         self.file_combo.activated[int].connect(self.select_file)
+        box.layout().addWidget(self.file_combo)
+        layout.addWidget(box, 0, 1)
 
-        button = gui.button(box, self, '...', callback=self.browse_file,
-                            autoDefault=False)
-        button.setIcon(self.style().standardIcon(QtGui.QStyle.SP_DirOpenIcon))
-        button.setSizePolicy(
-            QtGui.QSizePolicy.Maximum, QtGui.QSizePolicy.Fixed)
+        file_button = gui.button(
+            None, self, '...', callback=self.browse_file, autoDefault=False)
+        file_button.setIcon(self.style().standardIcon(
+            QtGui.QStyle.SP_DirOpenIcon))
+        file_button.setSizePolicy(Policy.Maximum, Policy.Fixed)
+        layout.addWidget(file_button, 0, 2)
 
-        button = gui.button(box, self, "Reload",
-                            callback=self.reload, autoDefault=False)
-        button.setIcon(
-            self.style().standardIcon(QtGui.QStyle.SP_BrowserReload))
-        button.setSizePolicy(
-            QtGui.QSizePolicy.Fixed, QtGui.QSizePolicy.Fixed)
+        reload_button = gui.button(
+            None, self, "Reload", callback=self.load_data, autoDefault=False)
+        reload_button.setIcon(self.style().standardIcon(
+            QtGui.QStyle.SP_BrowserReload))
+        reload_button.setSizePolicy(Policy.Fixed, Policy.Fixed)
+        layout.addWidget(reload_button, 0, 3)
 
-        gui.checkBox(vbox, self, "new_variables",
-                     "Columns with same name in different files " +
-                     "represent different variables")
+        self.sheet_box = gui.hBox(None, addToLayout=False, margin=0)
+        self.sheet_combo = gui.comboBox(None, self, "xls_sheet",
+                                        callback=self.select_sheet,
+                                        sendSelectedValue=True)
+        self.sheet_combo.setSizePolicy(
+            Policy.MinimumExpanding, Policy.Fixed)
+        self.sheet_label = QtGui.QLabel()
+        self.sheet_label.setText('Sheet')
+        self.sheet_label.setSizePolicy(
+            Policy.MinimumExpanding, Policy.Fixed)
+        self.sheet_box.layout().addWidget(
+            self.sheet_label, QtCore.Qt.AlignLeft)
+        self.sheet_box.layout().addWidget(
+            self.sheet_combo, QtCore.Qt.AlignVCenter)
+        layout.addWidget(self.sheet_box, 2, 1)
+        self.sheet_box.hide()
 
-        box = gui.widgetBox(self.controlArea, "Info", addSpace=True)
+        rb_button = gui.appendRadioButton(vbox, "URL:", addToLayout=False)
+        layout.addWidget(rb_button, 3, 0, QtCore.Qt.AlignVCenter)
+
+        self.url_combo = url_combo = QtGui.QComboBox()
+        url_model = NamedURLModel(self.sheet_names)
+        url_model.wrap(self.recent_urls)
+        url_combo.setModel(url_model)
+        url_combo.setSizePolicy(Policy.MinimumExpanding, Policy.Fixed)
+        url_combo.setEditable(True)
+        url_combo.setInsertPolicy(url_combo.InsertAtTop)
+        url_edit = url_combo.lineEdit()
+        l, t, r, b = url_edit.getTextMargins()
+        url_edit.setTextMargins(l + 5, t, r, b)
+        layout.addWidget(url_combo, 3, 1, 3, 3)
+        url_combo.activated.connect(self._url_set)
+
+        box = gui.vBox(self.controlArea, "Info")
         self.info = gui.widgetLabel(box, 'No data loaded.')
-        self.warnings = gui.widgetLabel(box, ' ')
+        self.warnings = gui.widgetLabel(box, '')
+
+        box = gui.widgetBox(self.controlArea, "Columns (Double click to edit)")
+        domain_editor = DomainEditor(self.variables)
+        self.editor_model = domain_editor.model()
+        box.layout().addWidget(domain_editor)
+
+        box = gui.hBox(self.controlArea)
+        gui.button(
+            box, self, "Browse documentation data sets",
+            callback=lambda: self.browse_file(True), autoDefault=False)
         gui.rubber(box)
-        #Set word wrap, so long warnings won't expand the widget
-        self.warnings.setWordWrap(True)
-        self.warnings.setSizePolicy(
-            QtGui.QSizePolicy.Ignored, QtGui.QSizePolicy.MinimumExpanding)
+        box.layout().addWidget(self.report_button)
+        self.report_button.setFixedWidth(170)
+
+        self.apply_button = gui.button(
+            box, self, "Apply", callback=self.apply_domain_edit)
+        self.apply_button.hide()
+        self.apply_button.setFixedWidth(170)
+        self.editor_model.dataChanged.connect(self.apply_button.show)
 
         self.set_file_list()
-        if len(self.recent_paths) > 0:
-            path = self.recent_paths[0].abspath
-            # Must not call open_file from within __init__. open_file
-            # explicitly re-enters the event loop (by a progress bar)
-            QtCore.QTimer.singleShot(0, lambda: self.open_file(path))
+        # Must not call open_file from within __init__. open_file
+        # explicitly re-enters the event loop (by a progress bar)
+        QtCore.QTimer.singleShot(0, self.load_data)
 
-    def _relocate_recent_files(self):
-        if self.recent_files and not self.recent_paths:
-            # backward compatibility settings restore
-            existing = [path for path in self.recent_files
-                        if os.path.exists(path)]
-            existing = [RecentPath(path, None, None) for path in existing]
-            self.recent_paths.extend(existing)
-            self.recent_files = []
+        self.setAcceptDrops(True)
 
-        paths = [("sample-datasets", get_sample_datasets_dir())]
-        basedir = self.workflowEnv().get("basedir", None)
-        if basedir is not None:
-            paths.append(("basedir", basedir))
-
-        rec = []
-        for recent in self.recent_paths:
-            resolved = recent.resolve(paths)
-            if resolved is not None:
-                rec.append(RecentPath.create(resolved.abspath, paths))
-            elif recent.search(paths) is not None:
-                rec.append(RecentPath.create(recent.search(paths), paths))
-            elif recent.prefix == "url-datasets":
-                valid, _ = self.is_url_valid(recent.abspath)
-                if valid:
-                    rec.append(recent)
-
-        self.recent_paths = rec
-
-    def set_file_list(self):
-        self.file_combo.clear()
-
-        if not self.recent_paths:
-            self.file_combo.addItem("(none)")
-            self.file_combo.model().item(0).setEnabled(False)
-        else:
-            for i, recent in enumerate(self.recent_paths):
-                self.file_combo.addItem(recent.icon, recent.value)
-                self.file_combo.model().item(i).setToolTip(recent.abspath)
-        self.file_combo.addItem("Browse documentation data sets...")
-
-    def reload(self):
-        if self.recent_paths:
-            basename = self.file_combo.currentText()
-            if (basename == self.recent_paths[0].relpath or
-                basename == self.recent_paths[0].value):
-                return self.open_file(self.recent_paths[0].abspath)
-        self.select_file(len(self.recent_paths) + 1)
+    def sizeHint(self):
+        return QtCore.QSize(600, 550)
 
     def select_file(self, n):
-        if n < len(self.recent_paths):
-            recent = self.recent_paths[n]
-            del self.recent_paths[n]
-            self.recent_paths.insert(0, recent)
-        elif n:
-            path = self.file_combo.currentText()
-            if path == "Browse documentation data sets...":
-                self.browse_file(True)
-            elif os.path.exists(path):
-                self._add_path(path)
-            else:
-                valid, err = self.is_url_valid(path)
-                if valid:
-                    _, filename = os.path.split(path)
-                    recent = RecentPath(path, "url-datasets", filename)
-                    if recent in self.recent_paths:
-                        self.recent_paths.remove(recent)
-                    self.recent_paths.insert(0, recent)
-                else:
-                    self.error(0, err)
-                    self.file_combo.removeItem(n)
-                    self.file_combo.lineEdit().setText(path)
-                    return
-
-        if len(self.recent_paths) > 0:
-            self.open_file(self.recent_paths[0].abspath)
+        assert n < len(self.recent_paths)
+        super().select_file(n)
+        if self.recent_paths:
+            self.source = self.LOCAL_FILE
+            self.load_data()
             self.set_file_list()
 
-    def browse_file(self, in_demos=0):
+    def select_sheet(self):
+        self.recent_paths[0].sheet = self.sheet_combo.currentText()
+        self.load_data()
+
+    def _url_set(self):
+        self.source = self.URL
+        self.load_data()
+
+    def browse_file(self, in_demos=False):
         if in_demos:
-            try:
-                start_file = get_sample_datasets_dir()
-            except AttributeError:
-                start_file = ""
-            if not start_file or not os.path.exists(start_file):
-                widgets_dir = os.path.dirname(gui.__file__)
-                orange_dir = os.path.dirname(widgets_dir)
-                start_file = os.path.join(orange_dir, "doc", "datasets")
-            if not start_file or not os.path.exists(start_file):
-                d = os.getcwd()
-                if os.path.basename(d) == "canvas":
-                    d = os.path.dirname(d)
-                start_file = os.path.join(os.path.dirname(d), "doc", "datasets")
+            start_file = get_sample_datasets_dir()
             if not os.path.exists(start_file):
                 QtGui.QMessageBox.information(
                     None, "File",
-                    "Cannot find the directory with example data sets")
+                    "Cannot find the directory with documentation data sets")
                 return
         else:
-            if self.recent_paths:
-                start_file = self.recent_paths[0].abspath
-            else:
-                start_file = os.path.expanduser("~/")
+            start_file = self.last_path() or os.path.expanduser("~/")
 
         filename = QtGui.QFileDialog.getOpenFileName(
-            self, 'Open Orange Data File', start_file, self.dlgFormats)
+            self, 'Open Orange Data File', start_file, self.dlg_formats)
         if not filename:
             return
-
-        self._add_path(filename)
-        self.set_file_list()
-        self.open_file(self.recent_paths[0].abspath)
-
-    def _add_path(self, filename):
-        searchpaths = [("sample-datasets", get_sample_datasets_dir())]
-        basedir = self.workflowEnv().get("basedir", None)
-        if basedir is not None:
-            searchpaths.append(("basedir", basedir))
-
-        recent = RecentPath.create(filename, searchpaths)
-
-        if recent in self.recent_paths:
-            self.recent_paths.remove(recent)
-
-        self.recent_paths.insert(0, recent)
-
-    @staticmethod
-    def is_url_valid(url):
-        try:
-            with urllib.request.urlopen(url) as f:
-                pass
-            return bool(f), ""
-        except urllib.error.HTTPError:
-            return False, "File '{}' is unavailable".format(os.path.basename(url))
-        except urllib.error.URLError:
-            return False, "URL '{}' is unavailable".format(url)
-        except ValueError:
-            return False, "Unknown file/URL '{}' ".format(url)
-        except (OSError, Exception) as e:
-            return False, str(e)
+        self.loaded_file = filename
+        self.add_path(filename)
+        self.source = self.LOCAL_FILE
+        self.load_data()
 
     # Open a file, create data from it and send it over the data channel
-    def open_file(self, fn):
-        self.error()
-        self.warning()
-        self.information()
-        fn_original = fn
-        if not os.path.exists(fn):
-            dir_name, basename = os.path.split(fn)
-            if os.path.exists(os.path.join(".", basename)):
-                fn = os.path.join(".", basename)
-                self.information("Loading '{}' from the current directory."
-                                 .format(basename))
-        if fn == "(none)":
-            self.send("Data", None)
-            self.info.setText("No data loaded")
-            self.warnings.setText("")
-            return
+    def load_data(self):
+        self.reader = self._get_reader()
+        self._update_sheet_combo()
 
-        self.loaded_file = ""
-
-        data = None
-        progress = gui.ProgressBar(self, 3)
-        progress.advance()
-        try:
-            # TODO handle self.new_variables
-            data = Table(fn)
-            self.loaded_file = fn
-        except Exception as exc:
-            if fn.startswith("http"):
-                err_value = "File '{}' does not contain valid data".format(
-                    os.path.basename(fn)
-                )
-            else:
-                err_value = str(exc)
-            ind = self.file_combo.currentIndex()
-            text = self.file_combo.currentText()
-            self.file_combo.removeItem(ind)
-            self.file_combo.lineEdit().setText(text)
-            if ind < len(self.recent_paths) and \
-                            self.recent_paths[ind].abspath == fn_original:
-                del self.recent_paths[ind]
-            self.error(err_value)
-            self.info.setText('Data was not loaded due to an error.\nError:')
-            self.warnings.setText(err_value)
-        finally:
-            progress.finish()
+        errors = []
+        with catch_warnings(record=True) as warnings:
+            try:
+                data = self.reader.read()
+            except Exception as ex:
+                errors.append("An error occured:")
+                errors.append(str(ex))
+                data = None
+                self.editor_model.reset()
+            self.warning(
+                33, warnings[-1].message.args[0] if warnings else '')
 
         if data is None:
-            self.dataReport = None
-        else:
-            domain = data.domain
-            text = "{} instance(s), {} feature(s), {} meta attribute(s)".format(
-                len(data), len(domain.attributes), len(domain.metas))
-            if domain.has_continuous_class:
-                text += "\nRegression; numerical class."
-            elif domain.has_discrete_class:
-                text += "\nClassification; discrete class with {} values.".format(
-                    len(domain.class_var.values))
-            elif data.domain.class_vars:
-                text += "\nMulti-target; {} target variables.".format(
-                    len(data.domain.class_vars))
-            else:
-                text += "\nData has no target variable."
-            if 'Timestamp' in data.domain:
-                # Google Forms uses this header to timestamp responses
-                text += '\n\nFirst entry: {}\nLast entry: {}'.format(
-                    data[0, 'Timestamp'], data[-1, 'Timestamp'])
-            self.info.setText(text)
-            self.warnings.setText("")
+            self.send("Data", None)
+            self.info.setText("\n".join(errors))
+            return
 
-            add_origin(data, fn)
+        self.info.setText(self._describe(data))
 
-            # Set title for URL paths
-            rp = self.recent_paths[0]
-            rp = self.recent_paths[0] = RecentPath(getattr(data, 'origin', rp.abspath),
-                                                   rp.prefix, rp.relpath, data.name)
-            # Ensure the same URL isn't in recent_paths twice
-            try: del self.recent_paths[self.recent_paths.index(rp, 1)]
-            except ValueError: pass
-
-            self.dataReport = self.prepareDataReport(data)
+        add_origin(data, self.loaded_file or self.last_path())
         self.send("Data", data)
+        self.editor_model.set_domain(data.domain)
+        self.data = data
 
-    def sendReport(self):
-        dataReport = getattr(self, "dataReport", None)
-        if dataReport:
-            self.reportSettings(
-                "File",
-                [("File name", self.loaded_file),
-                 ("Format", self.formats.get(os.path.splitext(
-                     self.loaded_file)[1], "unknown format"))])
-            self.reportData(self.dataReport)
+    def _get_reader(self):
+        """
 
-    def workflowEnvChanged(self, key, value, oldvalue):
-        if key == "basedir":
-            self._relocate_recent_files()
-            self.set_file_list()
+        Returns
+        -------
+        FileFormat
+        """
+        if self.source == self.LOCAL_FILE:
+            reader = FileFormat.get_reader(self.last_path())
+            if self.recent_paths and self.recent_paths[0].sheet:
+                reader.select_sheet(self.recent_paths[0].sheet)
+            return reader
+        elif self.source == self.URL:
+            return UrlReader(self.url_combo.currentText())
 
+    def _update_sheet_combo(self):
+        if len(self.reader.sheets) < 2:
+            self.sheet_box.hide()
+            self.reader.select_sheet(None)
+            return
+
+        self.sheet_combo.clear()
+        self.sheet_combo.addItems(self.reader.sheets)
+        self._select_active_sheet()
+        self.sheet_box.show()
+
+    def _select_active_sheet(self):
+        if self.reader.sheet:
+            try:
+                idx = self.reader.sheets.index(self.reader.sheet)
+                self.sheet_combo.setCurrentIndex(idx)
+            except ValueError:
+                # Requested sheet does not exist in this file
+                self.reader.select_sheet(None)
+        else:
+            self.sheet_combo.setCurrentIndex(0)
+
+    def _describe(self, table):
+        domain = table.domain
+        text = "{} instance(s), {} feature(s), {} meta attribute(s)".format(
+            len(table), len(domain.attributes), len(domain.metas))
+        if domain.has_continuous_class:
+            text += "\nRegression; numerical class."
+        elif domain.has_discrete_class:
+            text += "\nClassification; discrete class with {} values.".format(
+                len(domain.class_var.values))
+        elif table.domain.class_vars:
+            text += "\nMulti-target; {} target variables.".format(
+                len(table.domain.class_vars))
+        else:
+            text += "\nData has no target variable."
+        if 'Timestamp' in table.domain:
+            # Google Forms uses this header to timestamp responses
+            text += '\n\nFirst entry: {}\nLast entry: {}'.format(
+                table[0, 'Timestamp'], table[-1, 'Timestamp'])
+        return text
+
+    def storeSpecificSettings(self):
+        self.current_context.modified_variables = self.variables[:]
+
+    def retrieveSpecificSettings(self):
+        if hasattr(self.current_context, "modified_variables"):
+            self.variables[:] = self.current_context.modified_variables
+
+    def apply_domain_edit(self):
+        attributes = []
+        class_vars = []
+        metas = []
+        places = [attributes, class_vars, metas]
+        X, y, m = [], [], []
+        cols = [X, y, m]  # Xcols, Ycols, Mcols
+
+        def is_missing(x):
+            return str(x) in ("nan", "")
+
+        for column, (name, tpe, place, vals, is_con), (orig_var, orig_plc) in \
+            zip(count(), self.editor_model.variables,
+                chain([(at, 0) for at in self.data.domain.attributes],
+                      [(cl, 1) for cl in self.data.domain.class_vars],
+                      [(mt, 2) for mt in self.data.domain.metas])):
+            if place == 3:
+                continue
+            if orig_plc == 2:
+                col_data = list(chain(*self.data[:, orig_var].metas))
+            else:
+                col_data = list(chain(*self.data[:, orig_var]))
+            if name == orig_var.name and tpe == type(orig_var):
+                var = orig_var
+            elif tpe == DiscreteVariable:
+                values = list(str(i) for i in set(col_data) if not is_missing(i))
+                var = tpe(name, values)
+                col_data = [np.nan if is_missing(x) else values.index(str(x))
+                            for x in col_data]
+            elif tpe == StringVariable and type(orig_var) == DiscreteVariable:
+                var = tpe(name)
+                col_data = [orig_var.repr_val(x) if not np.isnan(x) else ""
+                            for x in col_data]
+            else:
+                var = tpe(name)
+            places[place].append(var)
+            cols[place].append(col_data)
+        domain = Domain(attributes, class_vars, metas)
+        X = np.array(X).T if len(X) else np.empty((len(self.data), 0))
+        y = np.array(y).T if len(y) else None
+        dtpe = object if any(isinstance(m, StringVariable)
+                             for m in domain.metas) else float
+        m = np.array(m, dtype=dtpe).T if len(m) else None
+        table = Table.from_numpy(domain, X, y, m, self.data.W)
+        self.send("Data", table)
+        self.apply_button.hide()
+
+    def get_widget_name_extension(self):
+        _, name = os.path.split(self.loaded_file)
+        return os.path.splitext(name)[0]
+
+    def send_report(self):
+        def get_ext_name(filename):
+            try:
+                return FileFormat.names[os.path.splitext(filename)[1]]
+            except KeyError:
+                return "unknown"
+
+        if self.data is None:
+            self.report_paragraph("File", "No file.")
+            return
+
+        if self.source == self.LOCAL_FILE:
+            home = os.path.expanduser("~")
+            if self.loaded_file.startswith(home):
+                # os.path.join does not like ~
+                name = "~/" + \
+                       self.loaded_file[len(home):].lstrip("/").lstrip("\\")
+            else:
+                name = self.loaded_file
+            if self.sheet_combo.isVisible():
+                name += " ({})".format(self.sheet_combo.currentText())
+            self.report_items("File", [("File name", name),
+                                       ("Format", get_ext_name(name))])
+        else:
+            self.report_items("Data", [("Resource", self.url),
+                                       ("Format", get_ext_name(self.url))])
+
+        self.report_data("Data", self.data)
+
+    def dragEnterEvent(self, event):
+        """Accept drops of valid file urls"""
+        urls = event.mimeData().urls()
+        if urls:
+            try:
+                FileFormat.get_reader(OSX_NSURL_toLocalFile(urls[0]) or
+                                      urls[0].toLocalFile())
+                event.acceptProposedAction()
+            except IOError:
+                pass
+
+    def dropEvent(self, event):
+        """Handle file drops"""
+        urls = event.mimeData().urls()
+        if urls:
+            self.add_path(OSX_NSURL_toLocalFile(urls[0]) or
+                          urls[0].toLocalFile())  # add first file
+            self.source = self.LOCAL_FILE
+            self.load_data()
 
 if __name__ == "__main__":
+    import sys
     a = QtGui.QApplication(sys.argv)
     ow = OWFile()
     ow.show()

@@ -1,3 +1,6 @@
+# Test methods with long descriptive names can omit docstrings
+# pylint: disable=missing-docstring
+
 import unittest
 import numpy as np
 
@@ -5,15 +8,18 @@ from Orange.data import Table
 from Orange.regression import MeanLearner
 
 
-class MeanTest(unittest.TestCase):
+class TestMeanLearner(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.learn = MeanLearner()
+
     def test_mean(self):
         nrows = 1000
         ncols = 10
         x = np.random.random_integers(1, 3, (nrows, ncols))
         y = np.random.random_integers(0, 4, (nrows, 1)) / 3.0
         t = Table(x, y)
-        learn = MeanLearner()
-        clf = learn(t)
+        clf = self.learn(t)
 
         true_mean = np.average(y)
         x2 = np.random.random_integers(1, 3, (nrows, ncols))
@@ -26,10 +32,9 @@ class MeanTest(unittest.TestCase):
         x = np.random.random_integers(1, 3, (nrows, ncols))
         y = np.random.random_integers(0, 4, (nrows, 1)) / 3.0
         heavy = 1
-        w = ((y == heavy) * 123 + 1.0 ) / 124.0
+        w = ((y == heavy) * 123 + 1.0) / 124.0
         t = Table(x, y, W=w)
-        learn = MeanLearner()
-        clf = learn(t)
+        clf = self.learn(t)
 
         expected_mean = np.average(y, weights=w)
         x2 = np.random.random_integers(1, 3, (nrows, ncols))
@@ -38,12 +43,10 @@ class MeanTest(unittest.TestCase):
 
     def test_empty(self):
         autompg = Table('auto-mpg')
-        learn = MeanLearner()
-        clf = learn(autompg[:0])
+        clf = self.learn(autompg[:0])
         y = clf(autompg[0])
-        self.assertTrue(y == 0)
+        self.assertEqual(y, 0)
 
     def test_discrete(self):
         iris = Table('iris')
-        learn = MeanLearner()
-        self.assertRaises(ValueError, learn, iris)
+        self.assertRaises(ValueError, self.learn, iris)

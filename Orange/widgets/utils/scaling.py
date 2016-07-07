@@ -55,7 +55,6 @@ class ScaleData:
     def __init__(self):
         self.raw_data = None           # input data
         self.attribute_names = []    # list of attribute names from self.raw_data
-        self.attribute_name_index = {}  # dict with indices to attributes
         self.attribute_flip_info = {}   # dictionary with attrName: 0/1 attribute is flipped or not
 
         self.data_has_class = False
@@ -111,8 +110,6 @@ class ScaleData:
         len_data = data and len(data) or 0
 
         self.attribute_names = [attr.name for attr in full_data.domain]
-        self.attribute_name_index = dict([(full_data.domain[i].name, i)
-                                          for i in range(len(full_data.domain))])
         self.attribute_flip_info = {}
 
         self.data_domain = full_data.domain
@@ -122,7 +119,7 @@ class ScaleData:
 
         self.data_class_name = self.data_has_class and full_data.domain.class_var.name
         if self.data_has_class:
-            self.data_class_index = self.attribute_name_index[self.data_class_name]
+            self.data_class_index = self.data_domain.index(self.data_class_name)
         self.have_data = bool(self.raw_data and len(self.raw_data) > 0)
 
         self.domain_data_stat = getCached(full_data,
@@ -244,7 +241,7 @@ class ScaleData:
         if self.data_domain[attr_name].is_discrete:
             return 0
 
-        index = self.attribute_name_index[attr_name]
+        index = self.data_domain.index(attr_name)
         self.attribute_flip_info[attr_name] = 1 - self.attribute_flip_info.get(attr_name, 0)
         if self.data_domain[attr_name].is_continuous:
             self.attr_values[attr_name] = [-self.attr_values[attr_name][1], -self.attr_values[attr_name][0]]
@@ -307,8 +304,8 @@ class ScaleScatterPlotData(ScaleData):
         Create x-y projection of attributes in attrlist.
 
         """
-        xattr_index = self.attribute_name_index[xattr]
-        yattr_index = self.attribute_name_index[yattr]
+        xattr_index = self.data_domain.index(xattr)
+        yattr_index = self.data_domain.index(yattr)
         if filter_valid is True:
             filter_valid = self.get_valid_list([xattr_index, yattr_index])
         if isinstance(filter_valid, np.ndarray):
@@ -486,54 +483,66 @@ class ScaleScatterPlotData(ScaleData):
                                     self.data_domain.class_var])
 
         # init again, in case that the attribute ordering took too much time
-        self.scatterWidget.progressBarInit()
         start_time = time.time()
-        count = len(attribute_name_order)*(len(attribute_name_order)-1)/2
         test_index = 0
 
-        for i in range(len(attribute_name_order)):
-            for j in range(i):
-                try:
-                    attr1 = self.attribute_name_index[attribute_name_order[j]]
-                    attr2 = self.attribute_name_index[attribute_name_order[i]]
-                    test_index += 1
-                    if self.clusterOptimization.isOptimizationCanceled():
-                        secs = time.time() - start_time
-                        self.clusterOptimization.setStatusBarText("Evaluation stopped (evaluated %d projections in %d min, %d sec)"
-                                                                  % (test_index, secs/60, secs%60))
-                        self.scatterWidget.progressBarFinished()
-                        return
+        count = len(attribute_name_order) * (len(attribute_name_order) - 1) / 2
+        with self.scatterWidget.progressBar(count) as progressBar:
+            for i in range(len(attribute_name_order)):
+                for j in range(i):
+                    try:
+                        index = self.data_domain.index
+                        attr1 = index(attribute_name_order[j])
+                        attr2 = index(attribute_name_order[i])
+                        test_index += 1
+                        if self.clusterOptimization.isOptimizationCanceled():
+                            secs = time.time() - start_time
+                            self.clusterOptimization.setStatusBarText(
+                                "Evaluation stopped "
+                                "(evaluated %d projections in %d min, %d sec)"
+                                % (test_index, secs / 60, secs % 60))
+                            return
 
-                    data = self.create_projection_as_example_table([attr1, attr2],
-                                                                   domain = domain,
-                                                                   jitter_size = jitter_size)
-                    graph, valuedict, closuredict, polygon_vertices_dict, enlarged_closure_dict, other_dict = self.clusterOptimization.evaluateClusters(data)
+                        data = self.create_projection_as_example_table(
+                            [attr1, attr2],
+                            domain=domain, jitter_size=jitter_size)
+                        graph, valuedict, closuredict, polygon_vertices_dict, \
+                            enlarged_closure_dict, other_dict = \
+                            self.clusterOptimization.evaluateClusters(data)
 
-                    all_value = 0.0
-                    classes_dict = {}
-                    for key in valuedict.keys():
-                        add_result_funct(valuedict[key], closuredict[key],
-                                         polygon_vertices_dict[key],
-                                         [attribute_name_order[i],
-                                          attribute_name_order[j]],
-                                          int(graph.objects[polygon_vertices_dict[key][0]].getclass()),
-                                          enlarged_closure_dict[key], other_dict[key])
-                        classes_dict[key] = int(graph.objects[polygon_vertices_dict[key][0]].getclass())
-                        all_value += valuedict[key]
-                    add_result_funct(all_value, closuredict, polygon_vertices_dict,
-                                     [attribute_name_order[i], attribute_name_order[j]],
-                                     classes_dict, enlarged_closure_dict, other_dict)     # add all the clusters
+                        all_value = 0.0
+                        classes_dict = {}
+                        for key in valuedict.keys():
+                            cls = int(graph.objects[polygon_vertices_dict
+                                                   [key][0]].getclass())
+                            add_result_funct(
+                                valuedict[key], closuredict[key],
+                                polygon_vertices_dict[key],
+                                [attribute_name_order[i],
+                                 attribute_name_order[j]],
+                                cls,
+                                enlarged_closure_dict[key], other_dict[key])
+                            classes_dict[key] = cls
+                            all_value += valuedict[key]
+                        # add all the clusters
+                        add_result_funct(
+                            all_value, closuredict, polygon_vertices_dict,
+                            [attribute_name_order[i], attribute_name_order[j]],
+                            classes_dict, enlarged_closure_dict, other_dict)
 
-                    self.clusterOptimization.setStatusBarText("Evaluated %d projections..."
-                                                              % (test_index))
-                    self.scatterWidget.progressBarSet(100.0*test_index/float(count))
-                    del data, graph, valuedict, closuredict, polygon_vertices_dict, enlarged_closure_dict, other_dict, classes_dict
-                except:
-                    type, val, traceback = sys.exc_info()
-                    sys.excepthook(type, val, traceback)  # print the exception
+                        self.clusterOptimization.setStatusBarText(
+                            "Evaluated %d projections..." % test_index)
+                        progressBar.advance()
+                        del data, graph, valuedict, closuredict, \
+                            polygon_vertices_dict, enlarged_closure_dict, \
+                            other_dict, classes_dict
+                    except:
+                        type, val, traceback = sys.exc_info()
+                        sys.excepthook(type, val, traceback)  # print the exception
 
         secs = time.time() - start_time
-        self.clusterOptimization.setStatusBarText("Finished evaluation (evaluated %d projections in %d min, %d sec)" % (test_index, secs/60, secs%60))
-        self.scatterWidget.progressBarFinished()
+        self.clusterOptimization.setStatusBarText(
+            "Finished evaluation (evaluated %d projections in %d min, %d sec)"
+            % (test_index, secs / 60, secs % 60))
 
     getOptimalClusters = get_optimal_clusters

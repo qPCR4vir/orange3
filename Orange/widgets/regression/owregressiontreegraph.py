@@ -1,9 +1,12 @@
 from PyQt4.QtGui import QBrush
+from PyQt4.QtCore import Qt
+
 from Orange.regression.tree import TreeRegressor
 from Orange.widgets import gui
 from Orange.widgets.settings import Setting, ClassValuesContextHandler
 from Orange.widgets.classify.owclassificationtreegraph import (OWTreeGraph,
                                                                TreeNode)
+from Orange.widgets.utils.colorpalette import ContinuousPaletteGenerator
 
 
 class RegressionTreeNode(TreeNode):
@@ -22,8 +25,9 @@ class RegressionTreeNode(TreeNode):
 
 class OWRegressionTreeGraph(OWTreeGraph):
     name = "Regression Tree Viewer"
-    description = "Graphical visualization of a regression tree."
+    description = "A graphical visualization of a regression tree."
     icon = "icons/RegressionTreeGraph.svg"
+    priority = 35
 
     settingsHandler = ClassValuesContextHandler()
     color_index = Setting(0)
@@ -35,23 +39,25 @@ class OWRegressionTreeGraph(OWTreeGraph):
 
     def __init__(self):
         super().__init__()
-        box = gui.widgetBox(self.controlArea, "Nodes", addSpace=True)
+        box = gui.vBox(self.controlArea, "Nodes", addSpace=True)
         self.color_combo = gui.comboBox(
-            box, self, "color_index", orientation=0, items=[],
-            label="Target class", callback=self.toggle_color,
+            box, self, "color_index", orientation=Qt.Horizontal, items=[],
+            label="Colors", callback=self.toggle_color,
             contentsLength=8)
         gui.separator(box)
-        gui.button(box, self, "Set Colors", callback=self.set_colors)
         gui.rubber(self.controlArea)
 
     def ctree(self, model=None):
-        super().ctree(model)
         if model is not None:
             self.color_combo.clear()
             self.color_combo.addItem("Default")
             self.color_combo.addItem("Instances in node")
             self.color_combo.addItem("Impurity")
             self.color_combo.setCurrentIndex(self.color_index)
+            self.scene.colorPalette = \
+                ContinuousPaletteGenerator(*model.domain.class_var.colors)
+        super().ctree(model)
+
 
     def update_node_info(self, node):
         distr = node.get_distribution()
@@ -74,9 +80,19 @@ class OWRegressionTreeGraph(OWTreeGraph):
         for node in self.scene.nodes():
             li = [0.5, node.num_instances() / all_instances,
                   node.impurity() / max_impurity][self.color_index]
-            node.backgroundBrush = QBrush(palette[self.color_index].light(
+            node.backgroundBrush = QBrush(palette[self.color_index].lighter(
                 180 - li * 150))
         self.scene.update()
+
+    def send_report(self):
+        if not self.tree:
+            return
+        self.report_items((
+            ("Tree size", self.info.text()),
+            ("Edge widths",
+             ("Fixed", "Relative to root", "Relative to parent")[
+                 self.line_width_method])))
+        self.report_plot(self.scene)
 
 
 if __name__ == "__main__":

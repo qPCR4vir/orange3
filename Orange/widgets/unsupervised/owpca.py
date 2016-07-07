@@ -7,9 +7,8 @@ import pyqtgraph as pg
 from Orange.data import Table, Domain, StringVariable
 from Orange.data.sql.table import SqlTable, AUTO_DL_LIMIT
 from Orange.preprocess import Normalize
-import Orange.projection
+from Orange.projection import PCA
 from Orange.widgets import widget, gui, settings
-from Orange.widgets.io import FileFormat
 
 try:
     from orangecontrib import remote
@@ -26,7 +25,8 @@ class OWPCA(widget.OWWidget):
 
     inputs = [("Data", Table, "set_data")]
     outputs = [("Transformed data", Table),
-               ("Components", Table)]
+               ("Components", Table),
+               ("PCA", PCA)]
 
     ncomponents = settings.Setting(2)
     variance_covered = settings.Setting(100)
@@ -35,8 +35,10 @@ class OWPCA(widget.OWWidget):
     auto_update = settings.Setting(True)
     auto_commit = settings.Setting(True)
     normalize = settings.Setting(True)
+    maxp = settings.Setting(20)
+    axis_labels = settings.Setting(10)
 
-    want_graph = True
+    graph_name = "plot.plotItem"
 
     def __init__(self):
         super().__init__()
@@ -47,8 +49,12 @@ class OWPCA(widget.OWWidget):
         self._variance_ratio = None
         self._cumulative = None
         self._line = False
+        self._pca_projector = PCA()
+        self._pca_projector.component = self.ncomponents
+        self._pca_preprocessors = PCA.preprocessors
 
-        box = gui.widgetBox(self.controlArea, "Components Selection")
+        # Components Selection
+        box = gui.vBox(self.controlArea, "Components Selection")
         form = QFormLayout()
         box.layout().addLayout(form)
 
@@ -66,12 +72,11 @@ class OWPCA(widget.OWWidget):
         )
         self.variance_spin.setSuffix("%")
 
-        form.addRow("Components", self.components_spin)
-        form.addRow("Variance covered", self.variance_spin)
+        form.addRow("Components:", self.components_spin)
+        form.addRow("Variance covered:", self.variance_spin)
 
-        self.sampling_box = gui.widgetBox(self.controlArea,
-                                          "Incremental learning")
-
+        # Incremental learning
+        self.sampling_box = gui.vBox(self.controlArea, "Incremental learning")
         self.addresstext = QLineEdit(box)
         self.addresstext.setPlaceholderText('Remote server')
         if self.address:
@@ -98,14 +103,20 @@ class OWPCA(widget.OWWidget):
 
         self.sampling_box.setVisible(remotely)
 
-        self.options_box = gui.widgetBox(self.controlArea, "Options")
+        # Options
+        self.options_box = gui.vBox(self.controlArea, "Options")
         gui.checkBox(self.options_box, self, "normalize", "Normalize data",
-                     callback=self.fit)
+                     callback=self._update_normalize)
+        self.maxp_spin = gui.spin(
+            self.options_box, self, "maxp", 1, 100,
+            label="Show only first", callback=self._setup_plot,
+            keyboardTracking=False
+        )
 
         self.controlArea.layout().addStretch()
 
-        gui.auto_commit(self.controlArea, self, "auto_commit", "Send data",
-                        checkbox_label="Auto send on change")
+        gui.auto_commit(self.controlArea, self, "auto_commit", "Apply",
+                        checkbox_label="Apply automatically")
 
         self.plot = pg.PlotWidget(background="w")
 
@@ -113,6 +124,8 @@ class OWPCA(widget.OWWidget):
         axis.setLabel("Principal Components")
         axis = self.plot.getAxis("left")
         axis.setLabel("Proportion of variance")
+        self.plot_horlabels = []
+        self.plot_horlines = []
 
         self.plot.getViewBox().setMenuEnabled(False)
         self.plot.getViewBox().setMouseEnabled(False, False)
@@ -120,7 +133,7 @@ class OWPCA(widget.OWWidget):
         self.plot.setRange(xRange=(0.0, 1.0), yRange=(0.0, 1.0))
 
         self.mainArea.layout().addWidget(self.plot)
-        self.graphButton.clicked.connect(self.save_graph)
+        self._update_normalize()
 
     def update_model(self):
         self.get_model()
@@ -168,13 +181,8 @@ class OWPCA(widget.OWWidget):
             self.start_button.setText("Start remote computation")
             self.start_button.setEnabled(True)
         else:
-            # TODO move the following normalization outside
-            # so it is applied for SqlTables as well (when it works on them)
-            if self.normalize:
-                data = Normalize(data)
             self.sampling_box.setVisible(False)
-            pca = Orange.projection.PCA()
-            pca = pca(data)
+            pca = self._pca_projector(data)
             variance_ratio = pca.explained_variance_ratio_
             cumulative = numpy.cumsum(variance_ratio)
             self.components_spin.setRange(0, len(cumulative))
@@ -192,6 +200,8 @@ class OWPCA(widget.OWWidget):
         self._variance_ratio = None
         self._cumulative = None
         self._line = None
+        self.plot_horlabels = []
+        self.plot_horlines = []
         self.plot.clear()
 
     def get_model(self):
@@ -205,47 +215,67 @@ class OWPCA(widget.OWWidget):
             return
         self._variance_ratio = self._pca.explained_variance_ratio_
         self._cumulative = numpy.cumsum(self._variance_ratio)
-        self.plot.clear()
         self._setup_plot()
         self._transformed = None
         self.commit()
 
     def _setup_plot(self):
+        self.plot.clear()
         explained_ratio = self._variance_ratio
         explained = self._cumulative
-        (p, ) = explained.shape
+        p = min(len(self._variance_ratio), self.maxp)
 
-        self.plot.plot(numpy.arange(p), explained_ratio,
+        self.plot.plot(numpy.arange(p), explained_ratio[:p],
                        pen=pg.mkPen(QColor(Qt.red), width=2),
                        antialias=True,
                        name="Variance")
-        self.plot.plot(numpy.arange(p), explained,
+        self.plot.plot(numpy.arange(p), explained[:p],
                        pen=pg.mkPen(QColor(Qt.darkYellow), width=2),
                        antialias=True,
                        name="Cumulative Variance")
 
+        cutpos = self._nselected_components() - 1
         self._line = pg.InfiniteLine(
-            angle=90, pos=self._nselected_components() - 1, movable=True,
-            bounds=(0, p - 1)
-        )
+            angle=90, pos=cutpos, movable=True, bounds=(0, p - 1))
         self._line.setCursor(Qt.SizeHorCursor)
-        self._line.setPen(pg.mkPen(QColor(Qt.darkGray), width=1.5))
+        self._line.setPen(pg.mkPen(QColor(Qt.black), width=2))
         self._line.sigPositionChanged.connect(self._on_cut_changed)
-
         self.plot.addItem(self._line)
+
+        self.plot_horlines = (
+            pg.PlotCurveItem(pen=pg.mkPen(QColor(Qt.blue), style=Qt.DashLine)),
+            pg.PlotCurveItem(pen=pg.mkPen(QColor(Qt.blue), style=Qt.DashLine)))
+        self.plot_horlabels = (
+            pg.TextItem(color=QColor(Qt.black), anchor=(1, 0)),
+            pg.TextItem(color=QColor(Qt.black), anchor=(1, 1)))
+        for item in self.plot_horlabels + self.plot_horlines:
+            self.plot.addItem(item)
+        self._set_horline_pos()
+
         self.plot.setRange(xRange=(0.0, p - 1), yRange=(0.0, 1.0))
-        axis = self.plot.getAxis("bottom")
-        axis.setTicks([[(i, "PC{}".format(i + 1)) for i in range(p)]])
+        self._update_axis()
+
+    def _set_horline_pos(self):
+        cutidx = self.ncomponents - 1
+        for line, label, curve in zip(self.plot_horlines, self.plot_horlabels,
+                                      (self._variance_ratio, self._cumulative)):
+            y = curve[cutidx]
+            line.setData([-1, cutidx], 2 * [y])
+            label.setPos(cutidx, y)
+            label.setPlainText("{:.2f}".format(y))
 
     def _on_cut_changed(self, line):
         # cut changed by means of a cut line over the scree plot.
-        value = line.value()
+        value = int(round(line.value()))
+        self._line.setValue(value)
         current = self._nselected_components()
-        components = int(numpy.floor(value)) + 1
+        components = value + 1
 
         if not (self.ncomponents == 0 and
                 components == len(self._variance_ratio)):
             self.ncomponents = components
+
+        self._set_horline_pos()
 
         if self._pca is not None:
             self.variance_covered = self._cumulative[components - 1] * 100
@@ -256,6 +286,7 @@ class OWPCA(widget.OWWidget):
     def _update_selection_component_spin(self):
         # cut changed by "ncomponents" spin.
         if self._pca is None:
+            self._invalidate_selection()
             return
 
         if self.ncomponents == 0:
@@ -282,6 +313,16 @@ class OWPCA(widget.OWWidget):
             self._line.setValue(cut - 1)
         self._invalidate_selection()
 
+    def _update_normalize(self):
+        if self.normalize:
+            pp = self._pca_preprocessors + [Normalize()]
+        else:
+            pp = self._pca_preprocessors
+        self._pca_projector.preprocessors = pp
+        self.fit()
+        if self.data is None:
+            self._invalidate_selection()
+
     def _nselected_components(self):
         """Return the number of selected components."""
         if self._pca is None:
@@ -304,6 +345,12 @@ class OWPCA(widget.OWWidget):
 
     def _invalidate_selection(self):
         self.commit()
+
+    def _update_axis(self):
+        p = min(len(self._variance_ratio), self.maxp)
+        axis = self.plot.getAxis("bottom")
+        d = max((p-1)//(self.axis_labels-1), 1)
+        axis.setTicks([[(i, str(i+1)) for i in range(0, p, d)]])
 
     def commit(self):
         transformed = components = None
@@ -328,16 +375,19 @@ class OWPCA(widget.OWWidget):
                                metas=metas)
             components.name = 'components'
 
+        self._pca_projector.component = self.ncomponents
         self.send("Transformed data", transformed)
         self.send("Components", components)
+        self.send("PCA", self._pca_projector)
 
-    def save_graph(self):
-        from Orange.widgets.data.owsave import OWSave
-
-        save_img = OWSave(data=self.plot.plotItem,
-                          file_formats=FileFormat.img_writers)
-        save_img.exec_()
-
+    def send_report(self):
+        if self.data is None:
+            return
+        self.report_items((
+            ("Selected components", self.ncomponents),
+            ("Explained variance", "{:.3f} %".format(self.variance_covered))
+        ))
+        self.report_plot()
 
 def main():
     import gc
@@ -357,5 +407,4 @@ def main():
     return rval
 
 if __name__ == "__main__":
-    import sys
-    sys.exit(main())
+    main()

@@ -12,9 +12,12 @@ from Orange.widgets.utils import itemmodels
 from Orange.widgets.utils.sql import check_sql_input
 
 
+INSTANCEID = "Same source"
+INDEX = "Index"
+
 class OWMergeData(widget.OWWidget):
     name = "Merge Data"
-    description = "Merge data sets based on values of selected data feature."
+    description = "Merge data sets based on the values of selected data features."
     icon = "icons/MergeData.svg"
     priority = 1110
 
@@ -36,12 +39,11 @@ class OWMergeData(widget.OWWidget):
         w = QtGui.QWidget(self)
         self.controlArea.layout().addWidget(w)
         grid = QtGui.QGridLayout()
-        grid.setMargin(0)
+        grid.setContentsMargins(0, 0, 0, 0)
         w.setLayout(grid)
 
         # attribute A selection
-        boxAttrA = gui.widgetBox(
-            self, self.tr("Attribute A"), addToLayout=False)
+        boxAttrA = gui.vBox(self, self.tr("Attribute A"), addToLayout=False)
         grid.addWidget(boxAttrA, 0, 0)
         self.attrViewA = QtGui.QListView(
             selectionMode=QtGui.QListView.SingleSelection
@@ -55,8 +57,7 @@ class OWMergeData(widget.OWWidget):
         boxAttrA.layout().addWidget(self.attrViewA)
 
         # attribute  B selection
-        boxAttrB = gui.widgetBox(
-            self, self.tr("Attribute B"), addToLayout=False)
+        boxAttrB = gui.vBox(self, self.tr("Attribute B"), addToLayout=False)
         grid.addWidget(boxAttrB, 0, 1)
         self.attrViewB = QtGui.QListView(
             selectionMode=QtGui.QListView.SingleSelection
@@ -70,40 +71,45 @@ class OWMergeData(widget.OWWidget):
         boxAttrB.layout().addWidget(self.attrViewB)
 
         # info A
-        boxDataA = gui.widgetBox(
-            self, self.tr("Data A Input"), addToLayout=False)
+        boxDataA = gui.vBox(self, self.tr("Data A Input"), addToLayout=False)
         grid.addWidget(boxDataA, 1, 0)
         self.infoBoxDataA = gui.widgetLabel(boxDataA, self.dataInfoText(None))
 
         # info B
-        boxDataB = gui.widgetBox(
-            self, self.tr("Data B Input"), addToLayout=False)
+        boxDataB = gui.vBox(self, self.tr("Data B Input"), addToLayout=False)
         grid.addWidget(boxDataB, 1, 1)
         self.infoBoxDataB = gui.widgetLabel(boxDataB, self.dataInfoText(None))
 
+        gui.rubber(self.buttonsArea)
         # resize
         self.resize(400, 500)
+
+    def setAttrs(self):
+        add = ()
+        if self.dataA is not None and self.dataB is not None \
+                and len(numpy.intersect1d(self.dataA.ids, self.dataB.ids)):
+            add = (INSTANCEID,)
+        if self.dataA is not None:
+            self.attrModelA[:] = add + allvars(self.dataA)
+        else:
+            self.attrModelA[:] = []
+        if self.dataB is not None:
+            self.attrModelB[:] = add + allvars(self.dataB)
+        else:
+            self.attrModelB[:] = []
 
     @check_sql_input
     def setDataA(self, data):
         #self.closeContext()
         self.dataA = data
-        if data is not None:
-            self.attrModelA[:] = allvars(data)
-        else:
-            self.attrModelA[:] = []
-
+        self.setAttrs()
         self.infoBoxDataA.setText(self.dataInfoText(data))
 
     @check_sql_input
     def setDataB(self, data):
         #self.closeContext()
         self.dataB = data
-        if data is not None:
-            self.attrModelB[:] = allvars(data)
-        else:
-            self.attrModelB[:] = []
-
+        self.setAttrs()
         self.infoBoxDataB.setText(self.dataInfoText(data))
 
     def handleNewSignals(self):
@@ -129,15 +135,12 @@ class OWMergeData(widget.OWWidget):
     def commit(self):
         indexA = self.selectedIndexA()
         indexB = self.selectedIndexB()
-        if indexA is None or indexB is None:
-            return
-
-        varA = self.attrModelA[indexA]
-        varB = self.attrModelB[indexB]
-
-        AB = merge(self.dataA, varA, self.dataB, varB)
-        BA = merge(self.dataB, varB, self.dataA, varA)
-
+        AB, BA = None, None
+        if indexA is not None and indexB is not None:
+            varA = self.attrModelA[indexA]
+            varB = self.attrModelB[indexB]
+            AB = merge(self.dataA, varA, self.dataB, varB)
+            BA = merge(self.dataB, varB, self.dataA, varA)
         self.send("Merged Data A+B", AB)
         self.send("Merged Data B+A", BA)
 
@@ -150,6 +153,14 @@ class OWMergeData(widget.OWWidget):
     def _invalidate(self):
         self.commit()
 
+    def send_report(self):
+        attr_a = self.selectedIndexA()
+        attr_b = self.selectedIndexB()
+        self.report_items((
+            ("Attribute A", attr_a and self.attrModelA[attr_a]),
+            ("Attribute B", attr_b and self.attrModelB[attr_b])
+        ))
+
 
 def selected_row(view):
     rows = view.selectionModel().selectedRows()
@@ -160,7 +171,7 @@ def selected_row(view):
 
 
 def allvars(data):
-    return data.domain.attributes + data.domain.class_vars + data.domain.metas
+    return (INDEX,) + data.domain.attributes + data.domain.class_vars + data.domain.metas
 
 
 def merge(A, varA, B, varB):
@@ -197,7 +208,9 @@ def group_table_indices(table, key_vars, exclude_unknown=False):
     """
     groups = defaultdict(list)
     for i, inst in enumerate(table):
-        key = [inst[a] for a in key_vars]
+        key = [inst.id if a == INSTANCEID else
+               i if a == INDEX else inst[a]
+                   for a in key_vars]
         if exclude_unknown and any(math.isnan(k) for k in key):
             continue
         key = tuple([str(k) for k in key])
@@ -210,7 +223,9 @@ def left_join_indices(table1, table2, vars1, vars2):
     key_map2 = group_table_indices(table2, vars2)
     indices = []
     for i, inst in enumerate(table1):
-        key = tuple([str(inst[v]) for v in vars1])
+        key = tuple([str(inst.id if v == INSTANCEID else
+                         i if v == INDEX else inst[v])
+                            for v in vars1])
         if key in key_map1 and key in key_map2:
             for j in key_map2[key]:
                 indices.append((i, j))

@@ -3,58 +3,84 @@
 from functools import wraps
 from itertools import chain, count
 from collections import OrderedDict
-import logging
+import warnings
 
-import numpy as np
+# Backwards-compat
+from Orange.data.util import scale  # pylint: disable=unused-import
 
 
-log = logging.getLogger()
+class OrangeWarning(UserWarning):
+    pass
+
+
+class OrangeDeprecationWarning(OrangeWarning, DeprecationWarning):
+    pass
+
+
+warnings.simplefilter('default', OrangeWarning)
 
 
 def deprecated(obj):
-    """Mark called object deprecated."""
-    @wraps(obj)
-    def wrapper(*args, **kwargs):
-        name = '{}.{}'.format(obj.__self__.__class__, obj.__name__) if hasattr(obj, '__self__') else obj
-        log.warning('Call to deprecated {}'.format(name))
-        return obj(*args, **kwargs)
-    return wrapper
+    """
+    Decorator. Mark called object deprecated.
+
+    Parameters
+    ----------
+    obj: callable or str
+        If callable, it is marked as deprecated and its calling raises
+        OrangeDeprecationWarning. If str, it is the alternative to be used
+        instead of the decorated function.
+
+    Returns
+    -------
+    f: wrapped callable or decorator
+        Returns decorator if obj was str.
+
+    Examples
+    --------
+    >>> @deprecated
+    ... def old():
+    ...     return 'old behavior'
+    >>> old()  # doctest: +SKIP
+    /... OrangeDeprecationWarning: Call to deprecated ... old ...
+    'old behavior'
+
+    >>> class C:
+    ...     @deprecated('C.new()')
+    ...     def old(self):
+    ...         return 'old behavior'
+    ...     def new(self):
+    ...         return 'new behavior'
+    >>> C().old() # doctest: +SKIP
+    /... OrangeDeprecationWarning: Call to deprecated ... C.old ...
+      Instead, use C.new() ...
+    'old behavior'
+    """
+    alternative = ('; Instead, use ' + obj) if isinstance(obj, str) else ''
+
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            name = '{}.{}'.format(func.__self__.__class__, func.__name__) if hasattr(func, '__self__') else func
+            warnings.warn('Call to deprecated {}{}'.format(name, alternative),
+                          OrangeDeprecationWarning, stacklevel=2)
+            return func(*args, **kwargs)
+        return wrapper
+
+    return decorator if alternative else decorator(obj)
+
+
+def try_(func, default=None):
+    """Try return the result of func, else return default."""
+    try:
+        return func()
+    except Exception:
+        return default
 
 
 def flatten(lst):
     """Flatten iterable a single level."""
     return chain.from_iterable(lst)
-
-
-def scale(values, min=0, max=1):
-    """Return values scaled to [min, max]"""
-    ptp = np.nanmax(values) - np.nanmin(values)
-    if ptp == 0:
-        return np.clip(values, min, max)
-    return (-np.nanmin(values) + values) / ptp * (max - min) + min
-
-
-def abstract(obj):
-    """Designate decorated class or method abstract."""
-    if isinstance(obj, type):
-        old__new__ = obj.__new__
-
-        def _refuse__new__(cls, *args, **kwargs):
-            if cls == obj:
-                raise NotImplementedError("Can't instantiate abstract class " + obj.__name__)
-            return old__new__(cls, *args, **kwargs)
-
-        obj.__new__ = _refuse__new__
-        return obj
-    else:
-        if not hasattr(obj, '__qualname__'):
-            raise TypeError('Put @abstract decorator below (evaluated before) '
-                            'any of @staticmethod, @classmethod, or @property.')
-        cls_name = obj.__qualname__.rsplit('.', 1)[0]
-        def _refuse__call__(*args, **kwargs):
-            raise NotImplementedError("Can't call abstract method {} of class {}"
-                                      .format(obj.__name__, cls_name))
-        return _refuse__call__
 
 
 class Registry(type):
@@ -101,6 +127,13 @@ def export_globals(globals, module_name):
                  or k.isupper()) and                             # or CONSTANTS
                 not getattr(v, '__name__', k).startswith('_'))]  # neither marked internal
 
+
+def color_to_hex(color):
+    return "#{:02X}{:02X}{:02X}".format(*color)
+
+
+def hex_to_color(s):
+    return int(s[1:3], 16), int(s[3:5], 16), int(s[5:7], 16)
 
 # For best result, keep this at the bottom
 __all__ = export_globals(globals(), __name__)

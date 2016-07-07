@@ -49,8 +49,8 @@ log = logging.getLogger(__name__)
 # TODO: Should this be moved to CanvasScene?
 class GraphicsSceneFocusEventListener(QGraphicsObject):
 
-    itemFocusedIn = Signal(QGraphicsItem)
-    itemFocusedOut = Signal(QGraphicsItem)
+    itemFocusedIn = Signal(object)
+    itemFocusedOut = Signal(object)
 
     def __init__(self, parent=None):
         QGraphicsObject.__init__(self, parent)
@@ -178,7 +178,7 @@ class SchemeEditWidget(QWidget):
         self.__cleanUpAction = \
             QAction(self.tr("Clean Up"), self,
                     objectName="cleanup-action",
-                    toolTip=self.tr("Align widget to a grid."),
+                    toolTip=self.tr("Align widgets to a grid."),
                     triggered=self.alignToGrid,
                     )
 
@@ -215,7 +215,7 @@ class SchemeEditWidget(QWidget):
         self.__newArrowAnnotationAction = \
             QAction(self.tr("Arrow"), self,
                     objectName="new-arrow-action",
-                    toolTip=self.tr("Add a arrow annotation to the workflow."),
+                    toolTip=self.tr("Add an arrow annotation to the workflow."),
                     checkable=True,
                     toggled=self.__toggleNewArrowAnnotation,
                     )
@@ -260,7 +260,7 @@ class SchemeEditWidget(QWidget):
         self.__redoAction.setObjectName("redo-action")
 
         self.__selectAllAction = \
-            QAction(self.tr("Select all"), self,
+            QAction(self.tr("Select All"), self,
                     objectName="select-all-action",
                     toolTip=self.tr("Select all items."),
                     triggered=self.selectAll,
@@ -359,6 +359,7 @@ class SchemeEditWidget(QWidget):
         layout.setSpacing(0)
 
         scene = CanvasScene()
+        scene.setItemIndexMethod(CanvasScene.NoIndex)
         self.__setupScene(scene)
 
         view = CanvasView(scene)
@@ -629,6 +630,7 @@ class SchemeEditWidget(QWidget):
             self.__undoStack.clear()
 
             self.__scene = CanvasScene()
+            self.__scene.setItemIndexMethod(CanvasScene.NoIndex)
             self.__setupScene(self.__scene)
 
             self.__view.setScene(self.__scene)
@@ -1456,7 +1458,7 @@ class SchemeEditWidget(QWidget):
             node = nodes[0]
             desc = node.description
 
-            help_url = "help://search?" + urlencode({"id": desc.id})
+            help_url = "help://search?" + urlencode({"id": desc.qualified_name})
             self.__showHelpFor(help_url)
 
     def __showHelpFor(self, help_url):

@@ -1,3 +1,6 @@
+# Test methods with long descriptive names can omit docstrings
+# pylint: disable=missing-docstring
+
 import unittest
 
 import numpy as np
@@ -7,20 +10,21 @@ from Orange.classification import KNNLearner
 from Orange.evaluation import CA, CrossValidation
 
 
-class KNNTest(unittest.TestCase):
+class TestKNNLearner(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.iris = Table('iris')
+        cls.learn = KNNLearner()
+
     def test_KNN(self):
-        table = Table('iris')
-        learn = KNNLearner()
-        results = CrossValidation(table, [learn], k=10)
+        results = CrossValidation(self.iris, [self.learn], k=10)
         ca = CA(results)
         self.assertGreater(ca, 0.8)
         self.assertLess(ca, 0.99)
 
     def test_predict_single_instance(self):
-        data = Table('iris')
-        learn = KNNLearner()
-        clf = learn(data)
-        for ins in data[::20]:
+        clf = self.learn(self.iris)
+        for ins in self.iris[::20]:
             clf(ins)
             val, prob = clf(ins, clf.ValueProbs)
 
@@ -38,9 +42,9 @@ class KNNTest(unittest.TestCase):
         class_vars = (DiscreteVariable('Target 1'),)
         domain = Domain(attr, class_vars)
         t = Table(domain, x1, y1)
-        learn = KNNLearner()
-        clf = learn(t)
+        clf = self.learn(t)
         z = clf(x2)
         correct = (z == y2.flatten())
         ca = sum(correct)/len(correct)
-        self.assertTrue(0.1 < ca < 0.3)
+        self.assertGreater(ca, 0.1)
+        self.assertLess(ca, 0.3)

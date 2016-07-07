@@ -56,7 +56,7 @@ class OWCorrespondenceAnalysis(widget.OWWidget):
 
     selected_var_indices = settings.ContextSetting([])
 
-    want_graph = True
+    graph_name = "plot.plotItem"
 
     def __init__(self):
         super().__init__()
@@ -65,29 +65,27 @@ class OWCorrespondenceAnalysis(widget.OWWidget):
         self.component_x = 0
         self.component_y = 1
 
-        box = gui.widgetBox(self.controlArea, "Variables")
+        box = gui.vBox(self.controlArea, "Variables")
         self.varlist = itemmodels.VariableListModel()
-        self.varview = view = QListView(
-            selectionMode=QListView.MultiSelection
-        )
+        self.varview = view = QListView(selectionMode=QListView.MultiSelection)
         view.setModel(self.varlist)
         view.selectionModel().selectionChanged.connect(self._var_changed)
 
         box.layout().addWidget(view)
 
-        axes_box = gui.widgetBox(self.controlArea, "Axes")
-        box = gui.widgetBox(axes_box, "Axis X", margin=0)
+        axes_box = gui.vBox(self.controlArea, "Axes")
+        box = gui.vBox(axes_box, "Axis X", margin=0)
         box.setFlat(True)
         self.axis_x_cb = gui.comboBox(
             box, self, "component_x", callback=self._component_changed)
 
-        box = gui.widgetBox(axes_box, "Axis Y", margin=0)
+        box = gui.vBox(axes_box, "Axis Y", margin=0)
         box.setFlat(True)
         self.axis_y_cb = gui.comboBox(
             box, self, "component_y", callback=self._component_changed)
 
         self.infotext = gui.widgetLabel(
-            gui.widgetBox(self.controlArea, "Contribution to Inertia"), "\n"
+            gui.vBox(self.controlArea, "Contribution to Inertia"), "\n"
         )
 
         gui.rubber(self.controlArea)
@@ -95,7 +93,6 @@ class OWCorrespondenceAnalysis(widget.OWWidget):
         self.plot = pg.PlotWidget(background="w")
         self.plot.setMenuEnabled(False)
         self.mainArea.layout().addWidget(self.plot)
-        self.graphButton.clicked.connect(self.save_graph)
 
     def set_data(self, data):
         self.closeContext()
@@ -238,12 +235,24 @@ class OWCorrespondenceAnalysis(widget.OWWidget):
             ax1, ax2 = self._p_axes()
             self.infotext.setText(fmt.format(inertia[ax1], inertia[ax2]))
 
-    def save_graph(self):
-        from Orange.widgets.data.owsave import OWSave
+    def send_report(self):
+        if self.data is None:
+            return
 
-        save_img = OWSave(data=self.plot.plotItem,
-                          file_formats=FileFormat.img_writers)
-        save_img.exec_()
+        vars = self.selected_vars()
+        if not vars:
+            return
+
+        items = OrderedDict()
+        items["Data instances"] = len(self.data)
+        if len(vars) == 1:
+            items["Selected variable"] = vars[0]
+        else:
+            items["Selected variables"] = "{} and {}".format(
+                ", ".join(var.name for var in vars[:-1]), vars[-1].name)
+        self.report_items(items)
+
+        self.report_plot()
 
 
 def burt_table(data, variables):
@@ -318,7 +327,7 @@ def correspondence(A):
 
     return CA(U, D, V, F, G, row_sum, col_sum)
 
-from collections import namedtuple
+from collections import namedtuple, OrderedDict
 
 CA = namedtuple("CA", ["U", "D", "V", "row_factors", "col_factors",
                        "row_sums", "column_sums"])

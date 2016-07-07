@@ -13,7 +13,7 @@ from Orange.widgets.utils.sql import check_sql_input
 
 
 class OWKMeans(widget.OWWidget):
-    name = "k-Means"
+    name = "k-means"
     description = "k-means clustering algorithm with silhouette-based " \
                   "quality estimation."
     icon = "icons/KMeans.svg"
@@ -59,15 +59,15 @@ class OWKMeans(widget.OWWidget):
         self.km = None
         self.optimization_runs = []
 
-        box = gui.widgetBox(self.controlArea, "Number of Clusters")
+        box = gui.vBox(self.controlArea, "Number of Clusters")
         layout = QGridLayout()
         bg = gui.radioButtonsInBox(
             box, self, "optimize_k", [], orientation=layout,
             callback=self.update)
         layout.addWidget(
-            gui.appendRadioButton(bg, "Fixed", addToLayout=False),
+            gui.appendRadioButton(bg, "Fixed:", addToLayout=False),
             1, 1)
-        sb = gui.widgetBox(None, margin=0, orientation="horizontal")
+        sb = gui.hBox(None, margin=0)
         self.fixedSpinBox = gui.spin(
             sb, self, "k", minv=2, maxv=30,
             controlWidth=60, alignment=Qt.AlignRight, callback=self.update_k)
@@ -75,15 +75,15 @@ class OWKMeans(widget.OWWidget):
         layout.addWidget(sb, 1, 2)
 
         layout.addWidget(
-            gui.appendRadioButton(bg, "Optimized", addToLayout=False), 2, 1)
-        ftobox = gui.widgetBox(None, orientation="horizontal")
-        ftobox.layout().setMargin(0)
+            gui.appendRadioButton(bg, "Optimized from", addToLayout=False), 2, 1)
+        ftobox = gui.hBox(None)
+        ftobox.layout().setContentsMargins(0, 0, 0, 0)
         layout.addWidget(ftobox)
         gui.spin(
             ftobox, self, "k_from", minv=2, maxv=29,
             controlWidth=60, alignment=Qt.AlignRight,
             callback=self.update_from)
-        gui.widgetLabel(ftobox, "  To: ")
+        gui.widgetLabel(ftobox, "to")
         self.fixedSpinBox = gui.spin(
             ftobox, self, "k_to", minv=3, maxv=30,
             controlWidth=60, alignment=Qt.AlignRight,
@@ -98,7 +98,7 @@ class OWKMeans(widget.OWWidget):
                 items=list(zip(*self.SCORING_METHODS))[0],
                 callback=self.update), 5, 2)
 
-        box = gui.widgetBox(self.controlArea, "Initialization")
+        box = gui.vBox(self.controlArea, "Initialization")
         gui.comboBox(
             box, self, "smart_init", items=self.INIT_METHODS,
             callback=self.update)
@@ -108,7 +108,7 @@ class OWKMeans(widget.OWWidget):
         box2.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Maximum)
         layout.addWidget(gui.widgetLabel(None, "Re-runs: "),
                          0, 0, Qt.AlignLeft)
-        sb = gui.widgetBox(None, margin=0, orientation="horizontal")
+        sb = gui.hBox(None, margin=0)
         layout.addWidget(sb, 0, 1)
         gui.lineEdit(
             sb, self, "n_init", controlWidth=60,
@@ -116,31 +116,30 @@ class OWKMeans(widget.OWWidget):
             callback=self.update)
         layout.addWidget(gui.widgetLabel(None, "Maximal iterations: "),
                          1, 0, Qt.AlignLeft)
-        sb = gui.widgetBox(None, margin=0, orientation="horizontal")
+        sb = gui.hBox(None, margin=0)
         layout.addWidget(sb, 1, 1)
         gui.lineEdit(sb, self, "max_iterations",
                      controlWidth=60, valueType=int,
                      validator=QIntValidator(),
                      callback=self.update)
 
-        box = gui.widgetBox(self.controlArea, "Output")
+        box = gui.vBox(self.controlArea, "Output")
         gui.comboBox(box, self, "place_cluster_ids",
-                     label="Append cluster id as ", orientation="horizontal",
+                     label="Append cluster ID as:", orientation=Qt.Horizontal,
                      callback=self.send_data, items=self.OUTPUT_METHODS)
         gui.lineEdit(box, self, "output_name",
-                     label="Name ", orientation="horizontal",
+                     label="Name:", orientation=Qt.Horizontal,
                      callback=self.send_data)
 
-        gui.auto_commit(self.controlArea, self, "auto_run", "Run",
-                        checkbox_label="Run after any change  ",
-                        orientation="horizontal")
+        gui.separator(self.buttonsArea, 30)
+        gui.auto_commit(self.buttonsArea, self, "auto_run", "Apply", box=None)
         gui.rubber(self.controlArea)
 
         self.table_model = QStandardItemModel(self)
         self.table_model.setHorizontalHeaderLabels(["k", "Score"])
         self.table_model.setColumnCount(2)
 
-        self.table_box = gui.widgetBox(
+        self.table_box = gui.vBox(
             self.mainArea, "Optimization Report", addSpace=0)
         table = self.table_view = QTableView(self.table_box)
         table.setHorizontalScrollMode(QTableView.ScrollPerPixel)
@@ -200,10 +199,10 @@ class OWKMeans(widget.OWWidget):
         self.updateOptimizationGui()
         self.update()
 
-    def check_data_size(self, n):
+    def check_data_size(self, n, msg_func):
         if n > len(self.data):
-            self.error("Not enough unique data instances ({}) for given "
-                       "number of clusters ({}).".format(len(self.data), n))
+            msg_func("Too few unique data instances ({}) for {} clusters".
+                     format(len(self.data), n))
             return False
         return True
 
@@ -213,28 +212,26 @@ class OWKMeans(widget.OWWidget):
         try:
             self.controlArea.setDisabled(True)
             self.optimization_runs = []
-            if self.check_data_size(self.k_to):
-                self.progressBarInit()
-                progress_steps = self.k_to - self.k_from + 1
-                self.optimization_runs = []
-                kmeans = KMeans(
-                    init=['random', 'k-means++'][self.smart_init],
-                    n_init=self.n_init,
-                    max_iter=self.max_iterations)
-                for k in range(self.k_from, self.k_to + 1):
-                    self.progressBarSet(100.0 * (k - self.k_from) /
-                                        progress_steps)
+            if not self.check_data_size(self.k_from, self.error):
+                return
+            self.check_data_size(self.k_to, self.warning)
+            k_to = min(self.k_to, len(self.data))
+            kmeans = KMeans(
+                init=['random', 'k-means++'][self.smart_init],
+                n_init=self.n_init, max_iter=self.max_iterations,
+                compute_silhouette_score=self.scoring == self.SILHOUETTE)
+            with self.progressBar(k_to - self.k_from + 1) as progress:
+                for k in range(self.k_from, k_to + 1):
+                    progress.advance()
                     kmeans.params["n_clusters"] = k
                     self.optimization_runs.append((k, kmeans(self.data)))
-                self.progressBarFinished()
         finally:
             self.controlArea.setDisabled(False)
         self.show_results()
         self.send_data()
 
-
     def cluster(self):
-        if not self.check_data_size(self.k):
+        if not self.check_data_size(self.k, self.error):
             return
         self.km = KMeans(
             n_clusters=self.k,
@@ -245,6 +242,7 @@ class OWKMeans(widget.OWWidget):
 
     def run(self):
         self.error()
+        self.warning()
         if not self.data:
             return
         if self.optimize_k:
@@ -267,8 +265,8 @@ class OWKMeans(widget.OWWidget):
         best_run = scores.index(best_score)
         score_span = (best_score - worst_score) or 1
         max_score = max(scores)
-        nplaces = min(5, int(abs(math.log(max(max_score, 1e-10)))) + 2)
-        fmt = "{{:.{}}}".format(nplaces)
+        nplaces = min(5, np.floor(abs(math.log(max(max_score, 1e-10)))) + 2)
+        fmt = "{{:.{}f}}".format(nplaces)
         model = self.table_model
         model.setRowCount(len(k_scores))
         for i, (k, score) in enumerate(k_scores):
@@ -281,7 +279,8 @@ class OWKMeans(widget.OWWidget):
             item = model.item(i, 1)
             if item is None:
                 item = QStandardItem()
-            item.setData(fmt.format(score), Qt.DisplayRole)
+            item.setData(fmt.format(score) if not np.isnan(score) else 'out-of-memory error',
+                         Qt.DisplayRole)
             bar_ratio = 0.95 * (score - worst_score) / score_span
             item.setData(bar_ratio, gui.TableBarItem.BarRole)
             model.setItem(i, 1, item)
@@ -328,22 +327,18 @@ class OWKMeans(widget.OWWidget):
         domain = self.data.domain
         attributes, classes = domain.attributes, domain.class_vars
         meta_attrs = domain.metas
-        X, Y, metas = self.data.X, self.data.Y, self.data.metas
         if self.place_cluster_ids == self.OUTPUT_CLASS:
             if classes:
                 meta_attrs += classes
-                metas = np.hstack((metas, Y.reshape(len(self.data), 1)))
             classes = [clust_var]
-            Y = clust_ids
         elif self.place_cluster_ids == self.OUTPUT_ATTRIBUTE:
             attributes += (clust_var, )
-            X = np.hstack((X, clust_ids))
         else:
             meta_attrs += (clust_var, )
-            metas = np.hstack((metas, clust_ids))
 
         domain = Domain(attributes, classes, meta_attrs)
-        new_table = Table(domain, X, Y, metas, self.data.W)
+        new_table = Table.from_table(domain, self.data)
+        new_table.get_column_view(clust_var)[0][:] = clust_ids.X.ravel()
 
         centroids = Table(Domain(km.pre_domain.attributes), km.centroids)
 
@@ -359,33 +354,29 @@ class OWKMeans(widget.OWWidget):
             self.data = data
             self.run()
 
-    def sendReport(self):
-        settings = [("Distance measure",
-                     self.distanceMeasures[self.distanceMeasure][0]),
-                    ("Initialization",
-                     self.initializations[self.initializationType][0]),
-                    ("Restarts",
-                     self.restarts)]
-        if self.optimized:
-            self.reportSettings("Settings", settings)
-            self.reportSettings("Optimization",
-                                [("Minimum num. of clusters",
-                                  self.optimizationFrom),
-                                 ("Maximum num. of clusters",
-                                  self.optimizationTo),
-                                 ("Scoring method",
-                                  self.scoringMethods[self.scoring][0])])
-        else:
-            self.reportSettings("Settings",
-                                settings + [("Number of clusters (K)",
-                                             self.K)])
-
-        self.reportData(self.data)
-        if self.optimized:
-            import OWReport
-
-            self.reportSection("Cluster size optimization report")
-            self.reportRaw(OWReport.reportTable(self.table_view))
+    def send_report(self):
+        self.report_items((
+            ("Number of clusters",
+             self.optimization_runs[self.selected_row()][1].k
+             if self.optimize_k else self.k),
+            ("Optimization",
+             self.optimize_k != 0 and
+             "{}, {} re-runs limited to {} steps".format(
+                 self.INIT_METHODS[self.smart_init].lower(),
+                 self.n_init, self.max_iterations)),
+            ("Cluster ID in output",
+             self.append_cluster_ids and
+             "'{}' (as {})".format(
+                 self.output_name,
+                 self.OUTPUT_METHODS[self.place_cluster_ids].lower()))
+        ))
+        if self.data:
+            self.report_data("Data", self.data)
+            if self.optimize_k:
+                self.report_table(
+                    "Scoring by {}".format(self.SCORING_METHODS[self.scoring][0]
+                                           ),
+                    self.table_view)
 
 
 if __name__ == "__main__":

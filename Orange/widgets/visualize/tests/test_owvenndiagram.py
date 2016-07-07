@@ -2,12 +2,12 @@ import unittest
 import numpy as np
 
 from Orange.data import (Table, Domain, StringVariable,
-                         DiscreteVariable, ContinuousVariable)
+                         DiscreteVariable, ContinuousVariable, dataset_dirs)
 from Orange.widgets.visualize.owvenndiagram import (reshape_wide,
                                                     table_concat,
                                                     varying_between,
                                                     drop_columns)
-
+from Orange.tests import test_filename
 
 class TestOWVennDiagram(unittest.TestCase):
     def add_metas(self, table, meta_attrs, meta_data):
@@ -36,6 +36,16 @@ class TestOWVennDiagram(unittest.TestCase):
         self.assertEqual(len(data), 1)
         np.testing.assert_equal(data.metas, np.array([[ca, cb, item_id]],
                                                      dtype=object))
+
+    def test_reshape_wide_missing_vals(self):
+        data = Table(test_filename("test9.tab"))
+        reshaped_data = reshape_wide(data, [], [data.domain[0]],
+                                     [data.domain[0]])
+        self.assertEqual(2, len(reshaped_data))
+
+    def test_varying_between_missing_vals(self):
+        data = Table(test_filename("test9.tab"))
+        self.assertEqual(6, len(varying_between(data, [data.domain[0]])))
 
     def test_venn_diagram(self):
         sources = ["SVM Learner", "Naive Bayes", "Random Forest"]

@@ -1,15 +1,19 @@
+# Test methods with long descriptive names can omit docstrings
+# pylint: disable=missing-docstring
+
 import unittest
 
 from Orange.data import Table, Variable
 from Orange.preprocess.continuize import DomainContinuizer
 from Orange.preprocess import Continuize
 from Orange.preprocess import transformation
+from Orange.tests import test_filename
 
 
-class ContinuizerTest(unittest.TestCase):
+class TestDomainContinuizer(unittest.TestCase):
     def setUp(self):
         Variable._clear_all_caches()
-        self.data = Table("test4")
+        self.data = Table(test_filename("test4"))
 
     def test_default(self):
         for inp in (self.data, self.data.domain):

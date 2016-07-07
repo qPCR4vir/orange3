@@ -373,8 +373,11 @@ class OWPlotGUI:
         '''
         self._check_box(widget, 'use_animations', 'Use animations', 'update_animations')
 
-    def _slider(self, widget, value, label, min_value, max_value, step, cb_name):
-        gui.hSlider(widget, self._plot, value, label=label, minValue=min_value, maxValue=max_value, step=step, callback=self._get_callback(cb_name))
+    def _slider(self, widget, value, label, min_value, max_value, step, cb_name,
+                show_number=False):
+        gui.hSlider(widget, self._plot, value, label=label, minValue=min_value,
+                    maxValue=max_value, step=step, createLabel=show_number,
+                    callback=self._get_callback(cb_name))
 
     def point_size_slider(self, widget):
         '''
@@ -433,7 +436,7 @@ class OWPlotGUI:
             The ``ids`` argument is a list of widget ID's that will be added to this box
         '''
         if box is None:
-            box = gui.widgetBox(widget, name)
+            box = gui.vBox(widget, name)
         self.add_widgets(ids, box)
         return box
 

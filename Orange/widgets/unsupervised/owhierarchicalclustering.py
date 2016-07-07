@@ -23,6 +23,7 @@ from PyQt4.QtCore import pyqtSignal as Signal
 import pyqtgraph as pg
 
 import Orange.data
+from Orange.data.domain import filter_visible
 import Orange.misc
 from Orange.clustering.hierarchical import \
     postorder, preorder, Tree, tree_from_linkage, leaves, prune, top_clusters
@@ -48,9 +49,10 @@ def dendrogram_layout(tree, expand_leaves=False):
         cluster = node.value
         if node.is_leaf:
             if expand_leaves:
-                start, end = float(cluster.first), float(cluster.last - 1)
+                start = float(cluster.first) + 0.5
+                end = float(cluster.last - 1) + 0.5
             else:
-                start = end = leaf_idx
+                start = end = leaf_idx + 0.5
                 leaf_idx += 1
             center = (start + end) / 2.0
             cluster_geometry[node] = (start, center, end)
@@ -235,7 +237,7 @@ class DendrogramWidget(QGraphicsWidget):
         self._cluster_parent = {}
         self.__hoverHighlightEnabled = hoverHighlightEnabled
         self.__selectionMode = selectionMode
-        self.setContentsMargins(5, 5, 5, 5)
+        self.setContentsMargins(0, 0, 0, 0)
         self.set_root(root)
 
     def clear(self):
@@ -578,8 +580,7 @@ class DendrogramWidget(QGraphicsWidget):
 
             item.setPath(Path_toQtPath(geom))
             item.setZValue(-node.value.height)
-            item.setPen(QPen(Qt.blue))
-            r = item.boundingRect()
+            r = item.path().boundingRect()
             base = self._root.value.height
 
             if self.orientation == Left:
@@ -599,9 +600,9 @@ class DendrogramWidget(QGraphicsWidget):
         crect = self.contentsRect()
         leaf_count = len(list(leaves(self._root)))
         if self.orientation in [Left, Right]:
-            drect = QSizeF(self._root.value.height, leaf_count - 1)
+            drect = QSizeF(self._root.value.height, leaf_count)
         else:
-            drect = QSizeF(self._root.value.last - 1, self._root.value.height)
+            drect = QSizeF(leaf_count, self._root.value.height)
 
         transform = QTransform().scale(
             crect.width() / drect.width(),
@@ -735,10 +736,12 @@ class OWHierarchicalClustering(widget.OWWidget):
     cluster_name = settings.Setting("Cluster")
     autocommit = settings.Setting(True)
 
-    want_graph = True
+    graph_name = "scene"
 
     #: Cluster variable domain role
     AttributeRole, ClassRole, MetaRole = 0, 1, 2
+
+    cluster_roles = ["Attribute", "Class variable", "Meta variable"]
 
     def __init__(self):
         super().__init__()
@@ -750,22 +753,19 @@ class OWHierarchicalClustering(widget.OWWidget):
         self._displayed_root = None
         self.cutoff_height = 0.0
 
-        gui.comboBox(gui.widgetBox(self.controlArea, "Linkage"),
-                     self, "linkage", items=LINKAGE,
-                     callback=self._invalidate_clustering)
+        gui.comboBox(
+            self.controlArea, self, "linkage", items=LINKAGE, box="Linkage",
+            callback=self._invalidate_clustering)
 
-        box = gui.widgetBox(self.controlArea, "Annotation")
         self.label_cb = gui.comboBox(
-            box, self, "annotation_idx", callback=self._update_labels,
-            contentsLength=12)
-
+            self.controlArea, self, "annotation_idx", box="Annotation",
+            callback=self._update_labels, contentsLength=12)
         self.label_cb.setModel(itemmodels.VariableListModel())
         self.label_cb.model()[:] = ["None", "Enumeration"]
 
         box = gui.radioButtons(
             self.controlArea, self, "pruning", box="Pruning",
-            callback=self._invalidate_pruning
-        )
+            callback=self._invalidate_pruning)
         grid = QGridLayout()
         box.layout().addLayout(grid)
         grid.addWidget(
@@ -779,7 +779,7 @@ class OWHierarchicalClustering(widget.OWWidget):
         )
 
         grid.addWidget(
-            gui.appendRadioButton(box, "Max depth", addToLayout=False),
+            gui.appendRadioButton(box, "Max depth:", addToLayout=False),
             1, 0)
         grid.addWidget(self.max_depth_spin, 1, 1)
 
@@ -795,7 +795,7 @@ class OWHierarchicalClustering(widget.OWWidget):
             0, 0
         )
         grid.addWidget(
-            gui.appendRadioButton(box, "Height ratio", addToLayout=False),
+            gui.appendRadioButton(box, "Height ratio:", addToLayout=False),
             1, 0
         )
         self.cut_ratio_spin = gui.spin(
@@ -807,7 +807,7 @@ class OWHierarchicalClustering(widget.OWWidget):
         grid.addWidget(self.cut_ratio_spin, 1, 1)
 
         grid.addWidget(
-            gui.appendRadioButton(box, "Top N", addToLayout=False),
+            gui.appendRadioButton(box, "Top N:", addToLayout=False),
             2, 0
         )
         self.top_n_spin = gui.spin(box, self, "top_n", 1, 20,
@@ -815,10 +815,9 @@ class OWHierarchicalClustering(widget.OWWidget):
         grid.addWidget(self.top_n_spin, 2, 1)
         box.layout().addLayout(grid)
 
-        zoom_box = gui.widgetBox(self.controlArea, "Zoom")
         self.zoom_slider = gui.hSlider(
-            zoom_box, self, "zoom_factor", minValue=-6, maxValue=3, step=1,
-            ticks=True, createLabel=False,
+            self.controlArea, self, "zoom_factor", box="Zoom",
+            minValue=-6, maxValue=3, step=1, ticks=True, createLabel=False,
             callback=self.__zoom_factor_changed)
 
         zoom_in = QAction(
@@ -838,7 +837,7 @@ class OWHierarchicalClustering(widget.OWWidget):
 
         self.controlArea.layout().addStretch()
 
-        box = gui.widgetBox(self.controlArea, "Output")
+        box = gui.vBox(self.controlArea, "Output")
         gui.checkBox(box, self, "append_clusters", "Append cluster IDs",
                      callback=self._invalidate_output)
 
@@ -848,23 +847,21 @@ class OWHierarchicalClustering(widget.OWWidget):
 
         cb = gui.comboBox(
             ibox, self, "cluster_role", callback=self._invalidate_output,
-            items=["Attribute",
-                   "Class variable",
-                   "Meta variable"]
+            items=self.cluster_roles
         )
         form = QFormLayout(
             fieldGrowthPolicy=QFormLayout.AllNonFixedFieldsGrow,
             labelAlignment=Qt.AlignLeft,
             spacing=8
         )
-        form.addRow("Name", name_edit)
-        form.addRow("Place", cb)
+        form.addRow("Name:", name_edit)
+        form.addRow("Place:", cb)
 
         ibox.layout().addSpacing(5)
         ibox.layout().addLayout(form)
         ibox.layout().addSpacing(5)
 
-        gui.auto_commit(box, self, "autocommit", "Send data", "Auto send is on",
+        gui.auto_commit(box, self, "autocommit", "Send Selected", "Send Automatically",
                         box=False)
 
         self.scene = QGraphicsScene()
@@ -900,7 +897,7 @@ class OWHierarchicalClustering(widget.OWWidget):
 
         self._main_graphics = QGraphicsWidget()
         self._main_layout = QGraphicsLinearLayout(Qt.Horizontal)
-        self._main_layout.setSpacing(1)
+        self._main_layout.setSpacing(10)
 
         self._main_graphics.setLayout(self._main_layout)
         self.scene.addItem(self._main_graphics)
@@ -911,11 +908,6 @@ class OWHierarchicalClustering(widget.OWWidget):
         self.dendrogram.selectionChanged.connect(self._invalidate_output)
         self.dendrogram.selectionEdited.connect(self._selection_edited)
 
-        fm = self.fontMetrics()
-        self.dendrogram.setContentsMargins(
-            5, fm.lineSpacing() / 2,
-            5, fm.lineSpacing() / 2
-        )
         self.labels = GraphicsSimpleTextList()
         self.labels.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
         self.labels.setAlignment(Qt.AlignLeft)
@@ -944,7 +936,6 @@ class OWHierarchicalClustering(widget.OWWidget):
         self.top_axis.line.valueChanged.connect(self._axis_slider_changed)
         self.dendrogram.geometryChanged.connect(self._dendrogram_geom_changed)
         self._set_cut_line_visible(self.selection_method == 1)
-        self.graphButton.clicked.connect(self.save_graph)
 
     def set_distances(self, matrix):
         self.error(0)
@@ -977,8 +968,9 @@ class OWHierarchicalClustering(widget.OWWidget):
                 [model.Separator],
                 items.domain.class_vars,
                 items.domain.metas,
-                [model.Separator] if items.domain.class_vars or items.domain.metas else [],
-                items.domain.attributes
+                [model.Separator] if (items.domain.class_vars or items.domain.metas) and
+                                     next(filter_visible(items.domain.attributes), False) else [],
+                filter_visible(items.domain.attributes)
             )
         elif isinstance(items, list) and \
                 all(isinstance(var, Orange.data.Variable) for var in items):
@@ -1297,13 +1289,6 @@ class OWHierarchicalClustering(widget.OWWidget):
         self.selection_method = 0
         self._selection_method_changed()
 
-    def save_graph(self):
-        from Orange.widgets.data.owsave import OWSave
-
-        save_img = OWSave(data=self.scene,
-                          file_formats=FileFormat.img_writers)
-        save_img.exec_()
-
     def __zoom_in(self):
         def clip(minval, maxval, val):
             return min(max(val, minval), maxval)
@@ -1338,6 +1323,30 @@ class OWHierarchicalClustering(widget.OWWidget):
         self.labels.setFont(font)
         self.dendrogram.setFont(font)
         self.__update_size_constraints()
+
+    def send_report(self):
+        annot = self.label_cb.currentText()
+        if self.annotation_idx <= 1:
+            annot = annot.lower()
+        if self.selection_method == 0:
+            sel = "manual"
+        elif self.selection_method == 1:
+            sel = "at {:.1f} of height".format(self.cut_ratio)
+        else:
+            sel = "top {} clusters".format(self.top_n)
+        self.report_items((
+            ("Linkage", LINKAGE[self.linkage].lower()),
+            ("Annotation", annot),
+            ("Prunning",
+             self.pruning != 0 and "{} levels".format(self.max_depth)),
+            ("Selection", sel),
+            ("Cluster ID in output",
+             self.append_clusters and
+             "{} (as {})".format(
+                 self.cluster_name,
+                 self.cluster_roles[self.cluster_role].lower()))
+        ))
+        self.report_plot()
 
 
 def qfont_scaled(font, factor):
@@ -1435,7 +1444,7 @@ class WrapperLayoutItem(QGraphicsLayoutItem):
         self.orientation = orientation
         self.item = item
         if orientation == Qt.Vertical:
-            self.item.rotate(-90)
+            self.item.setRotation(-90)
             self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         else:
             self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)

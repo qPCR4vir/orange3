@@ -1,10 +1,12 @@
-#!/bin/bash -e
-# Build an OSX Applicaiton (.app) for Orange Canvas
+#!/bin/bash
+# Build an OSX Application (.app) for Orange Canvas
 #
 # Example:
 #
 #     $ build-osx-app.sh $HOME/Applications/Orange3.app
 #
+
+set -e
 
 function print_usage() {
     echo 'build-osx-app.sh [-i] [--template] Orange3.app
@@ -107,11 +109,9 @@ PIP=$TEMPLATE/Contents/MacOS/pip
 PREFIX=$("$PYTHON" -c'import sys; print(sys.prefix)')
 SITE_PACKAGES=$("$PYTHON" -c'import sysconfig as sc; print(sc.get_path("platlib"))')
 
-echo "Installing Bottlechest"
-echo "======================"
-"$PIP" install --find-links http://orange.biolab.si/download/files/wheelhouse/ \
-               --use-wheel --trusted-host orange.biolab.si \
-               Bottlechest
+echo "Installing/updating setuptools and pip"
+echo "======================================"
+"$PIP" install 'setuptools==18.*' 'pip==7.*'
 
 echo "Installing orangeqt"
 echo "==================="
@@ -135,15 +135,33 @@ sed -i.bak "s@/.*\.app/@$TEMPLATE/@g" "${SITE_PACKAGES}"/sipconfig.py
     "$PIP" install qt-graph-helpers
 )
 
-echo "Installing pyqtgraph sqlparse"
-echo "============================="
+# Explicitly specify a numpy version due to an undeclared dependency of
+# scikit-learn's osx wheel files (0.17.1) which seem to be build against
+# numpy 1.10.*, and require numpy >= 1.10 ABI.
+echo "Installing numpy"
+echo "================"
 
-"$PIP" install pyqtgraph sqlparse
+"$PIP" install --only-binary numpy 'numpy==1.10.*'
 
 echo "Installing Orange"
 echo "================="
 
 "$PIP" install .
+
+echo "Running tests"
+echo "============="
+
+# Run in an empty dir to avoid imports from source checkout
+(
+    tmpdir=$(mktemp -d -t temp-test)
+    cleanup-on-exit() {
+        rm -r $tmpdir
+    }
+    trap cleanup-on-exit  EXIT
+    cd "$tmpdir"
+    "$PYTHON" -m unittest Orange.tests
+)
+
 
 cat <<-'EOF' > "$TEMPLATE"/Contents/MacOS/Orange
 	#!/bin/bash
@@ -161,13 +179,6 @@ cat <<-'EOF' > "$TEMPLATE"/Contents/MacOS/Orange
 EOF
 
 chmod +x "$TEMPLATE"/Contents/MacOS/Orange
-
-echo "Installing extra dependencies"
-echo "============================="
-# Install a delocated pygraphviz wheel (https://pypi.python.org/pypi/delocate).
-"$PIP" install --no-index --trusted-host orange.biolab.si \
-               --find-links http://orange.biolab.si/download/files/wheelhouse/ \
-              'pygraphviz>=1.3rc2'
 
 
 if [[ ! $INPLACE ]]; then

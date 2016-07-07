@@ -1,81 +1,53 @@
+from PyQt4.QtCore import Qt
+
 from Orange.data import Table
-from Orange.classification import KNNLearner, SklModel
-from Orange.preprocess.preprocess import Preprocess
-from Orange.widgets import widget, gui
+from Orange.classification import KNNLearner
+from Orange.widgets import gui
 from Orange.widgets.settings import Setting
-from Orange.widgets.utils.sql import check_sql_input
+from Orange.widgets.utils.owlearnerwidget import OWBaseLearner
 
 
-class OWKNNLearner(widget.OWWidget):
+class OWKNNLearner(OWBaseLearner):
     name = "Nearest Neighbors"
-    description = "k-nearest neighbors classification algorithm."
+    description = "Predict according to the nearest training instances."
     icon = "icons/KNN.svg"
-    inputs = [("Data", Table, "set_data"),
-              ("Preprocessor", Preprocess, "set_preprocessor")]
-    outputs = [("Learner", KNNLearner), ("Classifier", SklModel)]
+    priority = 20
 
-    want_main_area = False
-    resizing_enabled = False
+    LEARNER = KNNLearner
+
+    weights = ["uniform", "distance"]
+    metrics = ["euclidean", "manhattan", "chebyshev", "mahalanobis"]
 
     learner_name = Setting("kNN")
     n_neighbors = Setting(5)
     metric_index = Setting(0)
+    weight_type = Setting(0)
 
-    def __init__(self):
-        super().__init__()
-        self.data = None
-        self.preprocessors = None
+    def add_main_layout(self):
+        box = gui.vBox(self.controlArea, "Neighbors")
+        gui.spin(box, self, "n_neighbors", 1, 100, label="Number of neighbors:",
+                 alignment=Qt.AlignRight, callback=self.settings_changed)
+        gui.comboBox(box, self, "metric_index", label="Metric:",
+                     orientation=Qt.Horizontal,
+                     items=[i.capitalize() for i in self.metrics],
+                     callback=self.settings_changed)
+        gui.comboBox(box, self, "weight_type", label="Weight:",
+                     orientation=Qt.Horizontal,
+                     items=[i.capitalize() for i in self.weights],
+                     callback=self.settings_changed)
 
-        box = gui.widgetBox(self.controlArea, "Learner/Classifier Name")
-        gui.lineEdit(box, self, "learner_name")
-
-        box = gui.widgetBox(self.controlArea, "Neighbors")
-        gui.spin(box, self, "n_neighbors", 1, 100, label="Number of neighbors")
-
-        box = gui.widgetBox(box, "Metric")
-        box.setFlat(True)
-
-        gui.comboBox(box, self, "metric_index",
-                     items=["Euclidean", "Manhattan", "Maximal", "Mahalanobis"])
-        self.metrics = ["euclidean", "manhattan", "chebyshev", "mahalanobis"]
-
-        gui.button(self.controlArea, self, "Apply",
-                   callback=self.apply, default=True)
-
-        self.apply()
-
-    @check_sql_input
-    def set_data(self, data):
-        self.data = data
-        if data is not None:
-            self.apply()
-
-    def set_preprocessor(self, preproc):
-        if preproc is None:
-            self.preprocessors = None
-        else:
-            self.preprocessors = (preproc,)
-        self.apply()
-
-    def apply(self):
-        learner = KNNLearner(
+    def create_learner(self):
+        return self.LEARNER(
             n_neighbors=self.n_neighbors,
             metric=self.metrics[self.metric_index],
+            weights=self.weights[self.weight_type],
             preprocessors=self.preprocessors
         )
-        learner.name = self.learner_name
-        classifier = None
 
-        if self.data is not None:
-            self.error(0)
-            if not learner.check_learner_adequacy(self.data.domain):
-                self.error(0, learner.learner_adequacy_err_msg)
-            else:
-                classifier = learner(self.data)
-                classifier.name = self.learner_name
-
-        self.send("Learner", learner)
-        self.send("Classifier", classifier)
+    def get_learner_parameters(self):
+        return (("Number of neighbours", self.n_neighbors),
+                ("Metric", self.metrics[self.metric_index].capitalize()),
+                ("Weight", self.weights[self.weight_type].capitalize()))
 
 
 if __name__ == "__main__":

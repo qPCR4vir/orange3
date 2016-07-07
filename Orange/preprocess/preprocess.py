@@ -5,16 +5,16 @@ Preprocess
 """
 import numpy as np
 import sklearn.preprocessing as skl_preprocessing
-import bottlechest
+import bottleneck as bn
 
 import Orange.data
 from Orange.data import Table
 from . import impute, discretize
-from Orange.statistics import distribution
 from ..misc.enum import Enum
 
 __all__ = ["Continuize", "Discretize", "Impute", "SklImpute",
-           "Normalize", "Randomize", "RemoveNaNClasses"]
+           "Normalize", "Randomize", "RemoveNaNClasses",
+           "ProjectPCA", "ProjectCUR"]
 
 
 class Preprocess:
@@ -80,9 +80,12 @@ class Discretize(Preprocess):
         during discretization.
     """
 
-    def __init__(self, method=None, remove_const=True):
+    def __init__(self, method=None, remove_const=True,
+                 discretize_classes=False, discretize_metas=False):
         self.method = method
         self.remove_const = remove_const
+        self.discretize_classes = discretize_classes
+        self.discretize_metas = discretize_metas
 
     def __call__(self, data):
         """
@@ -106,11 +109,17 @@ class Discretize(Preprocess):
             else:
                 return var
 
+        def discretized(vars, do_discretize):
+            if do_discretize:
+                vars = (transform(var) for var in vars)
+                vars = [var for var in vars if var is not None]
+            return vars
+
         method = self.method or discretize.EqualFreq()
-        attributes = [transform(var) for var in data.domain.attributes]
-        attributes = [var for var in attributes if var is not None]
         domain = Orange.data.Domain(
-            attributes, data.domain.class_vars, data.domain.metas)
+            discretized(data.domain.attributes, True),
+            discretized(data.domain.class_vars, self.discretize_classes),
+            discretized(data.domain.metas, self.discretize_metas))
         return data.from_table(domain, data)
 
 
@@ -148,17 +157,13 @@ class Impute(Preprocess):
 class SklImpute(Preprocess):
     __wraps__ = skl_preprocessing.Imputer
 
-    def __init__(self, strategy='mean', force=True):
+    def __init__(self, strategy='mean'):
         self.strategy = strategy
-        self.force = force
 
     def __call__(self, data):
         from Orange.data.sql.table import SqlTable
         if isinstance(data, SqlTable):
             return Impute()(data)
-
-        if not self.force and not np.isnan(data.X).any():
-            return data
         self.imputer = skl_preprocessing.Imputer(strategy=self.strategy)
         X = self.imputer.fit_transform(data.X)
         # Create new variables with appropriate `compute_value`, but
@@ -172,7 +177,9 @@ class SklImpute(Preprocess):
         assert X.shape[1] == len(features)
         domain = Orange.data.Domain(features, data.domain.class_vars,
                                     data.domain.metas)
-        return Orange.data.Table(domain, X, data.Y, data.metas)
+        new_data = Orange.data.Table(domain, X, data.Y, data.metas, W=data.W)
+        new_data.attributes = getattr(data, 'attributes', {})
+        return new_data
 
 
 class RemoveConstant(Preprocess):
@@ -191,8 +198,8 @@ class RemoveConstant(Preprocess):
         data : an input data set
         """
 
-        oks = bottlechest.nanmin(data.X, axis=0) != \
-              bottlechest.nanmax(data.X, axis=0)
+        oks = bn.nanmin(data.X, axis=0) != \
+              bn.nanmax(data.X, axis=0)
         atts = [data.domain.attributes[i] for i, ok in enumerate(oks) if ok]
         domain = Orange.data.Domain(atts, data.domain.class_vars,
                                     data.domain.metas)
@@ -256,7 +263,7 @@ class Normalize(Preprocess):
     >>> from Orange.data import Table
     >>> from Orange.preprocess import Normalize
     >>> data = Table("iris")
-    >>> normalizer = Normalize(Normalize.NormalizeBySpan)
+    >>> normalizer = Normalize(norm_type=Normalize.NormalizeBySpan)
     >>> normalized_data = normalizer(data)
     """
 
@@ -362,6 +369,31 @@ class Randomize(Preprocess):
                 np.random.shuffle(table[:,i])
         else:
             np.random.shuffle(table)
+
+
+class ProjectPCA(Preprocess):
+
+    def __init__(self, n_components=None):
+        self.n_components = n_components
+
+    def __call__(self, data):
+        pca = Orange.projection.PCA(n_components=self.n_components)(data)
+        return pca(data)
+
+
+class ProjectCUR(Preprocess):
+
+    def __init__(self, rank=3, max_error=1):
+        self.rank = rank
+        self.max_error = max_error
+
+    def __call__(self, data):
+        rank = min(self.rank, min(data.X.shape)-1)
+        cur = Orange.projection.CUR(
+            rank=rank, max_error=self.max_error,
+            compute_U=False,
+        )(data)
+        return cur(data)
 
 
 class PreprocessorList:

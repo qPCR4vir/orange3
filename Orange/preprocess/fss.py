@@ -1,6 +1,7 @@
 import random
 import Orange
 import numpy as np
+from scipy.sparse import issparse
 
 from itertools import takewhile
 from operator import itemgetter
@@ -121,22 +122,36 @@ class SelectRandomFeatures:
         if type(self.k) == float:
             self.k = int(len(data.domain.attributes) * self.k)
         domain = Orange.data.Domain(
-            random.sample(data.domain.attributes, self.k),
+            random.sample(data.domain.attributes,
+                          min(self.k, len(data.domain.attributes))),
             data.domain.class_vars, data.domain.metas)
         return data.from_table(domain, data)
 
 
 class RemoveNaNColumns(Preprocess):
     """
-    Removes data columns that contain only unknown values. Returns the
-    resulting data set. Does not check optional class attribute(s).
+    Remove features from the data domain if they contain
+    `threshold` or more unknown values.
 
-    data : data table
-        an input data table
+    `threshold` can be an integer or a float in the range (0, 1) representing
+    the fraction of the data size. When not provided, columns with only missing
+    values are removed (default).
     """
-    def __call__(self, data):
-        nan_col = np.all(np.isnan(data.X), axis=0)
-        att = [a for a, nan in zip(data.domain.attributes, nan_col) if not nan]
+    def __init__(self, threshold=None):
+        self.threshold = threshold
+
+    def __call__(self, data, threshold=None):
+        # missing entries in sparse data are treated as zeros so we skip removing NaNs
+        if issparse(data.X):
+            return data
+
+        if threshold is None:
+            threshold = data.X.shape[0] if self.threshold is None else \
+                        self.threshold
+        if isinstance(threshold, float):
+            threshold = threshold * data.X.shape[0]
+        nans = np.sum(np.isnan(data.X), axis=0)
+        att = [a for a, n in zip(data.domain.attributes, nans) if n < threshold]
         domain = Orange.data.Domain(att, data.domain.class_vars,
                                     data.domain.metas)
         return Orange.data.Table(domain, data)

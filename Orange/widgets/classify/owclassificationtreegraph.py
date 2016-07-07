@@ -1,22 +1,24 @@
 import sys
-
+from collections import OrderedDict
 import numpy
 
 from sklearn.tree._tree import TREE_LEAF
+
+# This is not needed yet because it is imported from owtreeviewer2d :(
+from PyQt4.QtCore import Qt
 
 from Orange.widgets.classify.owtreeviewer2d import *
 
 from Orange.data import Table
 from Orange.classification.tree import TreeClassifier
 from Orange.preprocess.transformation import Indicator
-from Orange.widgets.utils.colorpalette import ColorPaletteDlg
 
-from Orange.widgets.settings import \
-    Setting, ContextSetting, ClassValuesContextHandler
+from Orange.widgets.settings import ContextSetting, ClassValuesContextHandler
 from Orange.widgets import gui
 
 
 class OWTreeGraph(OWTreeViewer2D):
+    priority = 35
     outputs = [("Data", Table)]
 
     def __init__(self):
@@ -32,25 +34,6 @@ class OWTreeGraph(OWTreeViewer2D):
         self.mainArea.layout().addWidget(self.scene_view)
         self.toggle_zoom_slider()
         self.scene.selectionChanged.connect(self.update_selection)
-
-        dlg = self.create_color_dialog()
-        self.scene.colorPalette = dlg.getDiscretePalette("colorPalette")
-
-    def set_colors(self):
-        dlg = self.create_color_dialog()
-        if dlg.exec_():
-            self.color_settings = dlg.getColorSchemas()
-            self.selected_color_settings_index = dlg.selectedSchemaIndex
-            self.scene.colorPalette = dlg.getDiscretePalette("colorPalette")
-            self.scene.update()
-            self.toggle_node_color()
-
-    def create_color_dialog(self):
-        c = ColorPaletteDlg(self, "Color Palette")
-        c.createDiscretePalette("colorPalette", "Discrete Palette")
-        c.setColorSchemas(self.color_settings,
-                          self.selected_color_settings_index)
-        return c
 
     def set_node_info(self):
         for node in self.scene.nodes():
@@ -107,8 +90,12 @@ class OWTreeGraph(OWTreeViewer2D):
                     Table.from_table(self.model.domain, self.dataset)
             else:
                 self.clf_dataset = self.dataset
+            class_var = self.domain.class_var
+            if class_var.is_discrete:
+                self.scene.colors = [QColor(*col) for col in class_var.colors]
             self.openContext(self.domain.class_var)
             self.root_node = self.walkcreate(self.tree, 0, None)
+            self.scene.addItem(self.root_node)
             self.info.setText(
                 '{} nodes, {} leaves'.
                 format(self.tree.node_count,
@@ -123,11 +110,12 @@ class OWTreeGraph(OWTreeViewer2D):
         self.send("Data", None)
 
     def walkcreate(self, tree, node_id, parent=None):
-        node = self.NODE(tree, self.domain, parent, None,
-                         self.scene, i=node_id)
+        node = self.NODE(tree, self.domain, parent, i=node_id)
+        self.scene.addItem(node)
         if parent:
-            parent.graph_add_edge(
-                GraphicsEdge(None, self.scene, node1=parent, node2=node))
+            edge = GraphicsEdge(node1=parent, node2=node)
+            self.scene.addItem(edge)
+            parent.graph_add_edge(edge)
         left_child_index = tree.children_left[node_id]
         right_child_index = tree.children_right[node_id]
 
@@ -140,7 +128,7 @@ class OWTreeGraph(OWTreeViewer2D):
     def node_tooltip(self, node):
         if node.i > 0:
             text = " AND\n".join(
-                "%s %s %s" % (n, s, v) for n, s, v in node.rule())
+                "%s %s %s" % (n, s, v) for (n, s), v in node.rule().items())
         else:
             text = "Root"
         return text
@@ -173,10 +161,21 @@ class OWTreeGraph(OWTreeViewer2D):
             data = None
         self.send("Data", data)
 
+    def send_report(self):
+        if not self.tree:
+            return
+        self.report_items((
+            ("Tree size", self.info.text()),
+            ("Edge widths",
+             ("Fixed", "Relative to root", "Relative to parent")[
+                 self.line_width_method]),
+            ("Target class", self.target_combo.currentText())))
+        self.report_plot(self.scene)
+
 
 class PieChart(QGraphicsRectItem):
-    def __init__(self, dist, r, parent, scene):
-        super().__init__(parent, scene)
+    def __init__(self, dist, r, parent):
+        super().__init__(parent)
         self.dist = dist
         self.r = r
 
@@ -191,7 +190,7 @@ class PieChart(QGraphicsRectItem):
     def paint(self, painter, option, widget=None):
         dist_sum = sum(self.dist)
         start_angle = 0
-        colors = self.scene().colorPalette
+        colors = self.scene().colors
         for i in range(len(self.dist)):
             angle = self.dist[i] * 16 * 360. / dist_sum
             if angle == 0:
@@ -254,8 +253,8 @@ def _assign_samples(tree, X):
 
 class TreeNode(GraphicsNode):
     def __init__(self, tree, domain, parent=None, parent_item=None,
-                 scene=None, i=0, distr=None):
-        super().__init__(tree, parent, parent_item, scene)
+                 i=0, distr=None):
+        super().__init__(tree, parent, parent_item)
         self.distribution = distr
         self.tree = tree
         self.domain = domain
@@ -292,7 +291,7 @@ class TreeNode(GraphicsNode):
                     else "≠ " * is_left_child + values[parent_attr_cv.value]
             else:
                 thresh = self.tree.threshold[self.parent.i]
-                return "%s %s" % ([">", "<="][is_left_child],
+                return "%s %s" % ([">", "≤"][is_left_child],
                                   attribute.str_val(thresh))
         else:
             return ""
@@ -327,12 +326,21 @@ class TreeNode(GraphicsNode):
                                    is_left_child * (len(values) == 2))]
             else:
                 attr_name = parent_attr.name
-                sign = [">", "<="][is_left_child]
+                sign = [">", "≤"][is_left_child]
                 value = "%.3f" % self.tree.threshold[self.parent.i]
-            pr.append((attr_name, sign, value))
+            if (attr_name, sign) in pr:
+                old_val = pr[(attr_name, sign)]
+                if sign == ">":
+                    pr[(attr_name, sign)] = max(float(value), float(old_val))
+                elif sign == "≠":
+                    pr[(attr_name, sign)] = "{}, {}".format(old_val, value)
+                elif sign == "≤":
+                    pr[(attr_name, sign)] = min(float(value), float(old_val))
+            else:
+                pr[(attr_name, sign)] = value
             return pr
         else:
-            return []
+            return OrderedDict()
 
     def is_leaf(self):
         """
@@ -408,10 +416,10 @@ class TreeNode(GraphicsNode):
 
 class ClassificationTreeNode(TreeNode):
     def __init__(self, tree, domain, parent=None, parent_item=None,
-                 scene=None, i=0, distr=None):
+                 i=0, distr=None):
         super().__init__(tree, domain, parent, parent_item,
-                         scene, i, distr)
-        self.pie = PieChart(self.get_distribution(), 8, self, scene)
+                         i, distr)
+        self.pie = PieChart(self.get_distribution(), 8, self)
 
     def get_distribution(self):
         """
@@ -445,26 +453,24 @@ class ClassificationTreeNode(TreeNode):
 
 class OWClassificationTreeGraph(OWTreeGraph):
     name = "Classification Tree Viewer"
-    description = "Graphical visualization of a classification tree."
-    icon = "icons/ClassificationTree.svg"
+    description = "A graphical visualization of a classification tree."
+    icon = "icons/ClassificationTreeGraph.svg"
 
     settingsHandler = ClassValuesContextHandler()
     target_class_index = ContextSetting(0)
-    color_settings = Setting(None)
-    selected_color_settings_index = Setting(0)
 
     inputs = [("Classification Tree", TreeClassifier, "ctree")]
     NODE = ClassificationTreeNode
 
     def __init__(self):
         super().__init__()
-        box = gui.widgetBox(self.controlArea, "Nodes", addSpace=True)
         self.target_combo = gui.comboBox(
-            box, self, "target_class_index", orientation=0, items=[],
-            label="Target class", callback=self.toggle_color,
-            contentsLength=8)
-        gui.separator(box)
-        gui.button(box, self, "Set Colors", callback=self.set_colors)
+            None, self, "target_class_index", orientation=Qt.Horizontal,
+            items=[], callback=self.toggle_color, contentsLength=8,
+            addToLayout=False,
+            sizePolicy=QSizePolicy(QSizePolicy.MinimumExpanding,
+                                   QSizePolicy.Fixed))
+        self.display_box.layout().addRow("Target class: ", self.target_combo)
         gui.rubber(self.controlArea)
 
     def ctree(self, model=None):
@@ -497,17 +503,17 @@ class OWClassificationTreeGraph(OWTreeGraph):
                      format(text))
 
     def toggle_node_color(self):
-        palette = self.scene.colorPalette
+        colors = self.scene.colors
         for node in self.scene.nodes():
             distr = node.get_distribution()
             total = numpy.sum(distr)
             if self.target_class_index:
                 p = distr[self.target_class_index - 1] / total
-                color = palette[self.target_class_index].light(200 - 100 * p)
+                color = colors[self.target_class_index - 1].lighter(200 - 100 * p)
             else:
                 modus = node.majority()
                 p = distr[modus] / (total or 1)
-                color = palette[int(modus)].light(400 - 300 * p)
+                color = colors[int(modus)].lighter(400 - 300 * p)
             node.backgroundBrush = QBrush(color)
         self.scene.update()
 

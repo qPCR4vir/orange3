@@ -1,3 +1,4 @@
+from collections import OrderedDict
 import sys
 
 import psycopg2
@@ -10,9 +11,11 @@ from Orange.data.sql.table import SqlTable, LARGE_TABLE, AUTO_DL_LIMIT
 from Orange.widgets import widget, gui
 from Orange.widgets.settings import Setting
 from Orange.widgets.widget import OutputSignal
+from Orange.canvas import report
 
 
 MAX_DL_LIMIT = 1000000
+EXTENSIONS = ('tsm_system_time', 'quantile')
 
 
 class OWSql(widget.OWWidget):
@@ -23,8 +26,6 @@ class OWSql(widget.OWWidget):
     long_description = """
     Sql widget connects to server and opens data from there. """
     icon = "icons/SQLTable.svg"
-    author = "Anze Staric"
-    maintainer_email = "anze.staric@fri.uni-lj.si"
     priority = 10
     category = "Data"
     keywords = ["data", "file", "load", "read"]
@@ -38,6 +39,7 @@ class OWSql(widget.OWWidget):
     host = Setting(None)
     port = Setting(None)
     database = Setting(None)
+    schema = Setting(None)
     username = Setting(None)
     password = Setting(None)
     table = Setting(None)
@@ -52,38 +54,47 @@ class OWSql(widget.OWWidget):
         super().__init__()
 
         self._connection = None
+        self.data_desc_table = None
+        self.database_desc = None
 
-        vbox = gui.widgetBox(self.controlArea, "Server", addSpace=True)
-        box = gui.widgetBox(vbox)
+        vbox = gui.vBox(self.controlArea, "Server", addSpace=True)
+        box = gui.vBox(vbox)
         self.servertext = QtGui.QLineEdit(box)
         self.servertext.setPlaceholderText('Server')
+        self.servertext.setToolTip('Server')
         if self.host:
             self.servertext.setText(self.host if not self.port else
                                     '{}:{}'.format(self.host, self.port))
         box.layout().addWidget(self.servertext)
         self.databasetext = QtGui.QLineEdit(box)
-        self.databasetext.setPlaceholderText('Database')
+        self.databasetext.setPlaceholderText('Database[/Schema]')
+        self.databasetext.setToolTip('Database or optionally Database/Schema')
         if self.database:
-            self.databasetext.setText(self.database)
+            self.databasetext.setText(
+                self.database if not self.schema else
+                '{}/{}'.format(self.database, self.schema))
         box.layout().addWidget(self.databasetext)
         self.usernametext = QtGui.QLineEdit(box)
         self.usernametext.setPlaceholderText('Username')
+        self.usernametext.setToolTip('Username')
         if self.username:
             self.usernametext.setText(self.username)
         box.layout().addWidget(self.usernametext)
         self.passwordtext = QtGui.QLineEdit(box)
         self.passwordtext.setPlaceholderText('Password')
+        self.passwordtext.setToolTip('Password')
         self.passwordtext.setEchoMode(QtGui.QLineEdit.Password)
         if self.password:
             self.passwordtext.setText(self.password)
         box.layout().addWidget(self.passwordtext)
 
-        tables = gui.widgetBox(box, orientation='horizontal')
+        tables = gui.hBox(box)
         self.tablecombo = QtGui.QComboBox(
             tables,
             minimumContentsLength=35,
             sizeAdjustPolicy=QtGui.QComboBox.AdjustToMinimumContentsLength
         )
+        self.tablecombo.setToolTip('table')
         tables.layout().addWidget(self.tablecombo)
         self.tablecombo.activated[int].connect(self.select_table)
         self.connectbutton = gui.button(
@@ -92,15 +103,17 @@ class OWSql(widget.OWWidget):
             QtGui.QSizePolicy.Fixed, QtGui.QSizePolicy.Fixed)
         tables.layout().addWidget(self.connectbutton)
 
-        self.custom_sql = gui.widgetBox(box, orientation='vertical')
+        self.custom_sql = gui.vBox(box)
         self.custom_sql.setVisible(False)
         self.sqltext = QtGui.QTextEdit(self.custom_sql)
         self.sqltext.setPlainText(self.sql)
         self.custom_sql.layout().addWidget(self.sqltext)
 
-        mt = gui.widgetBox(self.custom_sql, orientation='horizontal')
-        gui.checkBox(mt, self, 'materialize', 'materialize to table ')
-        gui.lineEdit(mt, self, 'materialize_table_name')
+        mt = gui.hBox(self.custom_sql)
+        cb = gui.checkBox(mt, self, 'materialize', 'Materialize to table ')
+        cb.setToolTip('Save results of the query in a table')
+        le = gui.lineEdit(mt, self, 'materialize_table_name')
+        le.setToolTip('Save results of the query in a table')
 
         self.executebtn = gui.button(
             self.custom_sql, self, 'Execute', callback=self.open_table)
@@ -115,31 +128,30 @@ class OWSql(widget.OWWidget):
                      "Download data to local memory",
                      callback=self.open_table)
 
-        self.connect()
-        if self.table:
-            QTimer.singleShot(0, self.open_table)
+        gui.rubber(self.buttonsArea)
+        QTimer.singleShot(0, self.connect)
 
     def error(self, id=0, text=""):
         super().error(id, text)
+        err_style = 'QLineEdit {border: 2px solid red;}'
         if 'server' in text or 'host' in text:
-            self.servertext.setStyleSheet('QLineEdit {border: 2px solid red;}')
+            self.servertext.setStyleSheet(err_style)
         else:
             self.servertext.setStyleSheet('')
         if 'role' in text:
-            self.usernametext.setStyleSheet('QLineEdit {border: 2px solid red;}')
+            self.usernametext.setStyleSheet(err_style)
         else:
             self.usernametext.setStyleSheet('')
         if 'database' in text:
-            self.databasetext.setStyleSheet('QLineEdit {border: 2px solid red;}')
+            self.databasetext.setStyleSheet(err_style)
         else:
             self.databasetext.setStyleSheet('')
-
 
     def connect(self):
         hostport = self.servertext.text().split(':')
         self.host = hostport[0]
         self.port = hostport[1] if len(hostport) == 2 else None
-        self.database = self.databasetext.text()
+        self.database, _, self.schema = self.databasetext.text().partition('/')
         self.username = self.usernametext.text() or None
         self.password = self.passwordtext.text() or None
         try:
@@ -151,18 +163,29 @@ class OWSql(widget.OWWidget):
                 password=self.password
             )
             self.error(0)
+            self.database_desc = OrderedDict((
+                ("Host", self.host), ("Port", self.port),
+                ("Database", self.database), ("User name", self.username)
+            ))
             self.refresh_tables()
+            self.select_table()
         except psycopg2.Error as err:
             self.error(0, str(err).split('\n')[0])
+            self.database_desc = self.data_desc_table = None
             self.tablecombo.clear()
-
 
     def refresh_tables(self):
         self.tablecombo.clear()
+        self.error(1)
         if self._connection is None:
+            self.data_desc_table = None
             return
 
         cur = self._connection.cursor()
+        if self.schema:
+            schema_clause = "AND n.nspname = '{}'".format(self.schema)
+        else:
+            schema_clause = "AND pg_catalog.pg_table_is_visible(c.oid)"
         cur.execute("""SELECT --n.nspname as "Schema",
                               c.relname AS "Name"
                        FROM pg_catalog.pg_class c
@@ -171,9 +194,9 @@ class OWSql(widget.OWWidget):
                         AND n.nspname <> 'pg_catalog'
                         AND n.nspname <> 'information_schema'
                         AND n.nspname !~ '^pg_toast'
-                        AND pg_catalog.pg_table_is_visible(c.oid)
+                        {}
                         AND NOT c.relname LIKE '\\_\\_%'
-                   ORDER BY 1;""")
+                   ORDER BY 1;""".format(schema_clause))
 
         self.tablecombo.addItem("Select a table")
         for i, (table_name,) in enumerate(cur.fetchall()):
@@ -189,17 +212,52 @@ class OWSql(widget.OWWidget):
             return self.open_table()
         else:
             self.custom_sql.setVisible(True)
+            self.data_desc_table = None
+            self.database_desc["Table"] = "(None)"
             self.table = None
 
+    def create_extensions(self):
+        missing = []
+        for ext in EXTENSIONS:
+            try:
+                cur = self._connection.cursor()
+                cur.execute("CREATE EXTENSION IF NOT EXISTS " + ext)
+            except psycopg2.OperationalError:
+                missing.append(ext)
+            finally:
+                self._connection.commit()
+        if missing:
+            self.error(1, 'Database missing extension{}: {}'.format(
+                's' if len(missing) > 1 else '',
+                ', '.join(missing)))
+        else:
+            self.error(1)
+
     def open_table(self):
+        self.create_extensions()
+        table = self.get_table()
+        self.data_desc_table = table
+        self.send("Data", table)
+
+    def get_table(self):
         if self.tablecombo.currentIndex() <= 0:
+            if self.database_desc:
+                self.database_desc["Table"] = "(None)"
+            self.data_desc_table = None
             return
 
         if self.tablecombo.currentIndex() < self.tablecombo.count() - 1:
             self.table = self.tablecombo.currentText()
+            self.database_desc["Table"] = self.table
+            if "Query" in self.database_desc:
+                del self.database_desc["Query"]
         else:
             self.sql = self.table = self.sqltext.toPlainText()
             if self.materialize:
+                if not self.materialize_table_name:
+                    self.error(
+                        0, "Specify a table name to materialize the query")
+                    return
                 try:
                     cur = self._connection.cursor()
                     cur.execute("DROP TABLE IF EXISTS " + self.materialize_table_name)
@@ -275,7 +333,16 @@ class OWSql(widget.OWWidget):
             table.download_data(MAX_DL_LIMIT)
             table = Table(table)
 
-        self.send("Data", table)
+        return table
+
+    def send_report(self):
+        if not self.database_desc:
+            self.report_paragraph("No database connection.")
+            return
+        self.report_items("Database", self.database_desc)
+        if self.data_desc_table:
+            self.report_items("Data",
+                              report.describe_data(self.data_desc_table))
 
 if __name__ == "__main__":
     import os

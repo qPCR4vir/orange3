@@ -1,4 +1,5 @@
 import numpy as np
+from PyQt4.QtCore import Qt
 
 from Orange.util import scale
 from Orange.misc import DistMatrix
@@ -15,6 +16,7 @@ class OWDistanceTransformation(widget.OWWidget):
 
     want_main_area = False
     resizing_enabled = False
+    buttons_area_orientation = Qt.Vertical
 
     normalization_method = settings.Setting(0)
     inversion_method = settings.Setting(0)
@@ -40,18 +42,20 @@ class OWDistanceTransformation(widget.OWWidget):
 
         self.data = None
 
-        box = gui.widgetBox(self.controlArea, "Normalization")
-        gui.radioButtons(box, self, "normalization_method",
+        gui.radioButtons(self.controlArea, self, "normalization_method",
+                         box="Normalization",
                          btnLabels=[x[0] for x in self.normalization_options],
                          callback=self._invalidate)
 
-        box = gui.widgetBox(self.controlArea, "Inversion")
-        gui.radioButtons(box, self, "inversion_method",
+        gui.radioButtons(self.controlArea, self, "inversion_method",
+                         box="Inversion",
                          btnLabels=[x[0] for x in self.inversion_options],
                          callback=self._invalidate)
 
-        gui.auto_commit(self.controlArea, self, "autocommit", "Apply",
-                        checkbox_label="Apply on any change")
+        box = gui.auto_commit(self.buttonsArea, self, "autocommit", "Apply",
+                              checkbox_label="Apply automatically", box=None)
+        box.layout().insertWidget(0, self.report_button)
+        box.layout().insertSpacing(1, 8)
 
     def set_data(self, data):
         self.data = data
@@ -68,6 +72,18 @@ class OWDistanceTransformation(widget.OWWidget):
             inv = self.inversion_options[self.inversion_method][1]
             distances = inv(distances)
         self.send("Distances", distances)
+
+    def send_report(self):
+        norm, normopt = self.normalization_method, self.normalization_options
+        inv, invopt = self.inversion_method, self.inversion_options
+        parts = []
+        if inv:
+            parts.append('inversion ({})'.format(invopt[inv][0]))
+        if norm:
+            parts.append('normalization ({})'.format(normopt[norm][0]))
+        self.report_items(
+            'Model parameters',
+            {'Transformation': ', '.join(parts).capitalize() or 'None'})
 
     def _invalidate(self):
         self.commit()

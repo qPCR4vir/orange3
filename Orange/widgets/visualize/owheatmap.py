@@ -373,7 +373,7 @@ _default_palette_index = \
 
 class OWHeatMap(widget.OWWidget):
     name = "Heat Map"
-    description = "Heatmap visualization."
+    description = "Plot a heat map for a pair of attributes."
     icon = "icons/Heatmap.svg"
     priority = 1040
 
@@ -450,7 +450,7 @@ class OWHeatMap(widget.OWWidget):
 
     auto_commit = settings.Setting(True)
 
-    want_graph = True
+    graph_name = "scene"
 
     def __init__(self):
         super().__init__()
@@ -483,7 +483,7 @@ class OWHeatMap(widget.OWWidget):
         self.__columns_cache = {}
 
         # GUI definition
-        colorbox = gui.widgetBox(self.controlArea, "Color")
+        colorbox = gui.vBox(self.controlArea, "Color")
         self.color_cb = gui.comboBox(colorbox, self, "palette_index")
         self.color_cb.setIconSize(QSize(64, 16))
         palettes = _color_palettes + self.user_palettes
@@ -524,7 +524,7 @@ class OWHeatMap(widget.OWWidget):
 
         colorbox.layout().addLayout(form)
 
-        mergebox = gui.widgetBox(self.controlArea, "Merge",)
+        mergebox = gui.vBox(self.controlArea, "Merge",)
         gui.checkBox(mergebox, self, "merge_kmeans", "Merge by k-means",
                      callback=self.update_sorting_examples)
         ibox = gui.indentedBox(mergebox)
@@ -532,7 +532,7 @@ class OWHeatMap(widget.OWWidget):
                  label="Clusters:", keyboardTracking=False,
                  callbackOnReturn=True, callback=self.update_merge)
 
-        sortbox = gui.widgetBox(self.controlArea, "Sorting")
+        sortbox = gui.vBox(self.controlArea, "Sorting")
         # For columns
         self.colsortcb = gui.comboBox(
             sortbox, self, "sort_columns_idx",
@@ -545,7 +545,7 @@ class OWHeatMap(widget.OWWidget):
             items=[name for _, name in self.RowOrdering],
             label='Rows', callback=self.update_sorting_examples)
 
-        box = gui.widgetBox(self.controlArea, 'Annotation && Legends')
+        box = gui.vBox(self.controlArea, 'Annotation && Legends')
 
         gui.checkBox(box, self, 'legend', 'Show legend',
                      callback=self.update_legend)
@@ -553,14 +553,13 @@ class OWHeatMap(widget.OWWidget):
         gui.checkBox(box, self, 'averages', 'Stripes with averages',
                      callback=self.update_averages_stripe)
 
-        annotbox = gui.widgetBox(box, "Row Annotations", addSpace=False)
+        annotbox = gui.vBox(box, "Row Annotations", addSpace=False)
         annotbox.setFlat(True)
         self.annotations_cb = gui.comboBox(annotbox, self, "annotation_index",
                                            items=self.annotation_vars,
                                            callback=self.update_annotations)
 
-        posbox = gui.widgetBox(box, "Column Labels Position",
-                               addSpace=False)
+        posbox = gui.vBox(box, "Column Labels Position", addSpace=False)
         posbox.setFlat(True)
 
         gui.comboBox(
@@ -573,7 +572,7 @@ class OWHeatMap(widget.OWWidget):
                      callback=self.__aspect_mode_changed)
 
         gui.rubber(self.controlArea)
-        gui.auto_commit(self.controlArea, self, "auto_commit", "Commit")
+        gui.auto_commit(self.controlArea, self, "auto_commit", "Send Selection", "Send Automatically")
 
         # Scene with heatmap
         self.heatmap_scene = self.scene = HeatmapScene(parent=self)
@@ -584,7 +583,8 @@ class OWHeatMap(widget.OWWidget):
             self.on_selection_finished)
         self.heatmap_scene.set_selection_manager(self.selection_manager)
 
-        item = QtGui.QGraphicsRectItem(0, 0, 10, 10, None, self.heatmap_scene)
+        item = QtGui.QGraphicsRectItem(0, 0, 10, 10, None)
+        self.heatmap_scene.addItem(item)
         self.heatmap_scene.itemsBoundingRect()
         self.heatmap_scene.removeItem(item)
 
@@ -608,7 +608,6 @@ class OWHeatMap(widget.OWWidget):
 
         self.selection_rects = []
         self.selected_rows = []
-        self.graphButton.clicked.connect(self.save_graph)
 
     def sizeHint(self):
         return QSize(800, 400)
@@ -778,7 +777,10 @@ class OWHeatMap(widget.OWWidget):
                     cluster = hierarchical.dist_matrix_clustering(matrix)
 
                 if ordered and cluster_ord is None:
-                    cluster_ord = hierarchical.optimal_leaf_ordering(cluster, matrix)
+                    with self.progressBar():
+                        cluster_ord = hierarchical.optimal_leaf_ordering(
+                            cluster, matrix,
+                            progress_callback=self.progressBarSet)
 
             row_groups.append(row._replace(cluster=cluster, cluster_ordered=cluster_ord))
 
@@ -807,7 +809,9 @@ class OWHeatMap(widget.OWWidget):
         if cluster is None:
             cluster = hierarchical.dist_matrix_clustering(matrix)
         if ordered and cluster_ord is None:
-            cluster_ord = hierarchical.optimal_leaf_ordering(cluster, matrix)
+            with self.progressBar():
+                cluster_ord = hierarchical.optimal_leaf_ordering(
+                    cluster, matrix, progress_callback=self.progressBarSet)
 
         col_groups = [col._replace(cluster=cluster, cluster_ordered=cluster_ord)
                       for col in parts.columns]
@@ -824,8 +828,6 @@ class OWHeatMap(widget.OWWidget):
             group_var = data.domain.class_var
         else:
             group_var = None
-
-        self.progressBarInit()
 
         group_label = split_label
         if self.merge_kmeans:
@@ -894,7 +896,6 @@ class OWHeatMap(widget.OWWidget):
         self.__columns_cache[group_label] = parts
 
         self.heatmapparts = parts
-        self.progressBarFinished()
 
     def construct_heatmaps_scene(self, parts, data):
         def select_row(item):
@@ -1039,10 +1040,10 @@ class OWHeatMap(widget.OWWidget):
                 if sort_j[j] is not None:
                     X_part = X_part[:, sort_j[j]]
 
-                hw.set_heatmap_data(X_part)
                 hw.set_levels(parts.levels)
                 hw.set_color_table(palette)
                 hw.set_show_averages(self.averages)
+                hw.set_heatmap_data(X_part)
 
                 grid.addItem(hw, Row0 + i * 2 + 1, Col0 + j)
                 grid.setRowStretchFactor(Row0 + i * 2 + 1, X_part.shape[0] * 100)
@@ -1213,8 +1214,8 @@ class OWHeatMap(widget.OWWidget):
 
     def __update_margins(self):
         """
-        Update dendrogram and text list widgets margins to include the
-        space for average stripe.
+        Update horizontal dendrogram and text list widgets margins to
+        include the space for average stripe.
         """
         def offset(hm):
             if hm.show_averages:
@@ -1223,36 +1224,22 @@ class OWHeatMap(widget.OWWidget):
                 return 0
 
         hm_row = self.heatmap_widget_grid[0]
-        hm_col = next(zip(*self.heatmap_widget_grid))
         dendrogram_col = self.col_dendrograms
-        dendrogram_row = self.row_dendrograms
 
         col_annot = zip(self.col_annotation_widgets_top,
                         self.col_annotation_widgets_bottom)
-        row_annot = self.row_annotation_widgets
 
         for hm, annot, dendrogram in zip(hm_row, col_annot, dendrogram_col):
             left_offset = offset(hm)
             if dendrogram is not None:
-                width = hm.size().width()
-                col_count = hm.heatmap_data().shape[1]
-                half_col = (width - left_offset) / col_count / 2
-                _, top, _, bottom = dendrogram.getContentsMargins()
+                _, top, right, bottom = dendrogram.getContentsMargins()
                 dendrogram.setContentsMargins(
-                    left_offset + half_col, top, half_col, bottom)
+                    left_offset, top, right, bottom)
 
             _, top, right, bottom = annot[0].getContentsMargins()
             annot[0].setContentsMargins(left_offset, top, right, bottom)
             _, top, right, bottom = annot[1].getContentsMargins()
             annot[1].setContentsMargins(left_offset, top, right, bottom)
-
-        for hm, annot, dendrogram in zip(hm_col, row_annot, dendrogram_row):
-            if dendrogram is not None:
-                height = hm.size().height()
-                row_count = hm.heatmap_data().shape[0]
-                half_row = height / row_count / 2
-                left, _, right, _ = dendrogram.getContentsMargins()
-                dendrogram.setContentsMargins(left, half_row, right, half_row)
 
     def __update_clustering_enable_state(self, data):
         def enable(item, state):
@@ -1508,16 +1495,19 @@ class OWHeatMap(widget.OWWidget):
 
         self.send("Selected Data", data)
 
-    def save_graph(self):
-        from Orange.widgets.data.owsave import OWSave
-
-        save_img = OWSave(data=self.scene,
-                          file_formats=FileFormat.img_writers)
-        save_img.exec_()
-
     def onDeleteWidget(self):
         self.clear()
         super().onDeleteWidget()
+
+    def send_report(self):
+        self.report_items((
+            ("Columns:", self.ColumnOrdering[self.sort_columns_idx][1].lower()),
+            ("Rows:", self.RowOrdering[self.sort_rows_idx][1].lower()),
+            ("Row annotation",
+             self.annotation_index > 0 and
+             self.annotation_vars[self.annotation_index])
+        ))
+        self.report_plot()
 
 
 class GraphicsWidget(QtGui.QGraphicsWidget):

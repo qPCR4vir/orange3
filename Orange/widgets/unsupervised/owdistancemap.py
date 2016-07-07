@@ -8,7 +8,7 @@ import numpy
 from PyQt4.QtGui import (
     QFormLayout, QGraphicsRectItem, QGraphicsGridLayout,
     QFontMetrics, QPen, QIcon, QPixmap, QLinearGradient, QPainter, QColor,
-    QBrush, QTransform, QGraphicsWidget, QApplication
+    QBrush, QTransform, QApplication
 )
 
 from PyQt4.QtCore import Qt, QRect, QRectF, QSize, QPointF
@@ -19,12 +19,11 @@ import pyqtgraph as pg
 import Orange.data
 import Orange.misc
 from Orange.clustering import hierarchical
+from Orange.data.domain import filter_visible
 
 from Orange.widgets import widget, gui, settings
 from Orange.widgets.utils import itemmodels, colorbrewer
 from .owhierarchicalclustering import DendrogramWidget, GraphicsSimpleTextList
-from Orange.widgets.io import FileFormat
-
 
 def _remove_item(item):
     item.setParentItem(None)
@@ -239,11 +238,13 @@ _default_colormap_index = len(_color_palettes) - 1
 class OWDistanceMap(widget.OWWidget):
     name = "Distance Map"
     description = "Visualize a distance matrix."
-    icon = "icons/DistanceMatrix.svg"
+    icon = "icons/DistanceMap.svg"
     priority = 1200
 
     inputs = [("Distances", Orange.misc.DistMatrix, "set_distances")]
     outputs = [("Data", Orange.data.Table), ("Features", widget.AttributeList)]
+
+    settingsHandler = settings.PerfectDomainContextHandler()
 
     #: type of ordering to apply to matrix rows/columns
     NoOrdering, Clustering, OrderedClustering = 0, 1, 2
@@ -255,11 +256,11 @@ class OWDistanceMap(widget.OWWidget):
     color_low = settings.Setting(0.0)
     color_high = settings.Setting(1.0)
 
-    annotation_idx = settings.Setting(0)
+    annotation_idx = settings.ContextSetting(0, exclude_metas=False)
 
     autocommit = settings.Setting(True)
 
-    want_graph = True
+    graph_name = "grid_widget"
 
     # Disable clustering for inputs bigger than this
     _MaxClustering = 3000
@@ -277,17 +278,14 @@ class OWDistanceMap(widget.OWWidget):
         self._sort_indices = None
         self._selection = None
 
-        box = gui.widgetBox(self.controlArea, "Element sorting", margin=0)
         self.sorting_cb = gui.comboBox(
-            box, self, "sorting",
+            self.controlArea, self, "sorting", box="Element Sorting",
             items=["None", "Clustering", "Clustering with ordered leaves"],
             callback=self._invalidate_ordering)
 
-        box = gui.widgetBox(self.controlArea, "Colors")
-
+        box = gui.vBox(self.controlArea, "Colors")
         self.colormap_cb = gui.comboBox(
-            box, self, "colormap", callback=self._update_color
-        )
+            box, self, "colormap", callback=self._update_color)
         self.colormap_cb.setIconSize(QSize(64, 16))
         self.palettes = list(_color_palettes)
 
@@ -306,29 +304,28 @@ class OWDistanceMap(widget.OWWidget):
 #                         createLabel=False, callback=self._update_color)
 #         )
         form.addRow(
-            "Low",
+            "Low:",
             gui.hSlider(box, self, "color_low", minValue=0.0, maxValue=1.0,
                         step=0.05, ticks=True, intOnly=False,
                         createLabel=False, callback=self._update_color)
         )
         form.addRow(
-            "High",
+            "High:",
             gui.hSlider(box, self, "color_high", minValue=0.0, maxValue=1.0,
                         step=0.05, ticks=True, intOnly=False,
                         createLabel=False, callback=self._update_color)
         )
         box.layout().addLayout(form)
 
-        box = gui.widgetBox(self.controlArea, "Annotations")
-        self.annot_combo = gui.comboBox(box, self, "annotation_idx",
-                                        callback=self._invalidate_annotations,
-                                        contentsLength=12)
+        self.annot_combo = gui.comboBox(
+            self.controlArea, self, "annotation_idx", box="Annotations",
+            callback=self._invalidate_annotations, contentsLength=12)
         self.annot_combo.setModel(itemmodels.VariableListModel())
         self.annot_combo.model()[:] = ["None", "Enumeration"]
         self.controlArea.layout().addStretch()
 
         gui.auto_commit(self.controlArea, self, "autocommit",
-                        "Send data", "Auto send is on")
+                        "Send Selected")
 
         self.view = pg.GraphicsView(background="w")
         self.mainArea.layout().addWidget(self.view)
@@ -381,9 +378,9 @@ class OWDistanceMap(widget.OWWidget):
         self.dendrogram = None
 
         self.grid_widget.scene().installEventFilter(self)
-        self.graphButton.clicked.connect(self.save_graph)
 
     def set_distances(self, matrix):
+        self.closeContext()
         self.clear()
         self.error(0)
         if matrix is not None:
@@ -435,10 +432,11 @@ class OWDistanceMap(widget.OWWidget):
             model[:] = ["None", "Enumeration"]
         elif not axis:
             model[:] = ["None", "Enumeration", "Attribute names"]
-            self.annotation_idx = 2
         elif isinstance(items, Orange.data.Table):
-            model[:] = (["None", "Enumeration"] +
-                        list(items.domain) + list(items.domain.metas))
+            annot_vars = list(filter_visible(items.domain)) + list(items.domain.metas)
+            model[:] = ["None", "Enumeration"] + annot_vars
+            self.annotation_idx = 0
+            self.openContext(items.domain)
         elif isinstance(items, list) and \
                 all(isinstance(item, Orange.data.Variable) for item in items):
             model[:] = ["None", "Enumeration", "Name"]
@@ -492,7 +490,7 @@ class OWDistanceMap(widget.OWWidget):
         self._clear_plot()
         self.matrix_item = DistanceMapItem(self._sorted_matrix)
         # Scale the y axis to compensate for pg.ViewBox's y axis invert
-        self.matrix_item.scale(1, -1)
+        self.matrix_item.setTransform(QTransform.fromScale(1, -1), )
         self.viewbox.addItem(self.matrix_item)
         # Set fixed view box range.
         h, w = self._sorted_matrix.shape
@@ -526,6 +524,7 @@ class OWDistanceMap(widget.OWWidget):
         if self.matrix is not None:
             self._update_ordering()
             self._setup_scene()
+            self._update_labels()
 
     def _update_ordering(self):
         if self.sorting == OWDistanceMap.NoOrdering:
@@ -549,9 +548,9 @@ class OWDistanceMap(widget.OWWidget):
             self._update_labels()
 
     def _update_labels(self, ):
-        if self.annotation_idx == 0:
+        if self.annotation_idx == 0:  # None
             labels = None
-        elif self.annotation_idx == 1:
+        elif self.annotation_idx == 1:  # Enumeration
             labels = [str(i + 1) for i in range(self.matrix.shape[0])]
         elif self.annot_combo.model()[self.annotation_idx] == "Attribute names":
                 attr = self.matrix.row_items.domain.attributes
@@ -562,7 +561,7 @@ class OWDistanceMap(widget.OWWidget):
         elif isinstance(self.items, Orange.data.Table):
             var = self.annot_combo.model()[self.annotation_idx]
             column, _ = self.items.get_column_view(var)
-            labels = [var.repr_val(value) for value in column]
+            labels = [var.str_val(value) for value in column]
 
         self._set_labels(labels)
 
@@ -629,16 +628,20 @@ class OWDistanceMap(widget.OWWidget):
         self.send("Data", datasubset)
         self.send("Features", featuresubset)
 
-    def save_graph(self):
-        from Orange.widgets.data.owsave import OWSave
-
-        save_img = OWSave(data=self.grid_widget,
-                          file_formats=FileFormat.img_writers)
-        save_img.exec_()
-
     def onDeleteWidget(self):
         super().onDeleteWidget()
         self.clear()
+
+    def send_report(self):
+        annot = self.annot_combo.currentText()
+        if self.annotation_idx <= 1:
+            annot = annot.lower()
+        self.report_items((
+            ("Sorting", self.sorting_cb.currentText().lower()),
+            ("Annotations", annot)
+        ))
+        if self.matrix is not None:
+            self.report_plot()
 
 
 class TextList(GraphicsSimpleTextList):
@@ -721,6 +724,9 @@ def init_color_combo(cb, palettes, iconsize):
 
 
 def test(argv=sys.argv):
+    app = QApplication(list(argv))
+    argv = app.arguments()
+
     if len(argv) > 1:
         filename = argv[1]
     else:
@@ -728,7 +734,7 @@ def test(argv=sys.argv):
 
     import sip
     import Orange.distance
-    app = QApplication(argv)
+
     w = OWDistanceMap()
     w.show()
     w.raise_()
@@ -744,5 +750,6 @@ def test(argv=sys.argv):
     del w
     return rval
 
+# run widget by python -m Orange.widgets.unsupervised.owdistancemap
 if __name__ == "__main__":
     sys.exit(test())

@@ -1,21 +1,43 @@
+# Test methods with long descriptive names can omit docstrings
+# pylint: disable=missing-docstring
+
 import os
 import unittest
 from itertools import chain
 from math import isnan
 import random
 
+from unittest.mock import Mock, MagicMock, patch
+from scipy.sparse import csr_matrix, issparse
+import numpy as np
+
 from Orange import data
 from Orange.data import filter, Variable
 from Orange.data import Unknown
+from Orange.tests import test_dirname
 
-import numpy as np
-from unittest.mock import Mock, MagicMock, patch
+
+@np.vectorize
+def naneq(a, b):
+    try:
+        return (isnan(a) and isnan(b)) or a == b
+    except TypeError:
+        return a == b
+
+
+def assert_array_nanequal(*args, **kwargs):
+    # similar as np.testing.assert_array_equal but with better handling of
+    # object arrays
+    return np.testing.utils.assert_array_compare(naneq, *args, **kwargs)
 
 
 class TableTestCase(unittest.TestCase):
     def setUp(self):
         Variable._clear_all_caches()
-        data.table.dataset_dirs.append("Orange/tests")
+        data.table.dataset_dirs.append(test_dirname())
+
+    def tearDown(self):
+        data.table.dataset_dirs.remove(test_dirname())
 
     def test_indexing_class(self):
         d = data.Table("test1")
@@ -564,6 +586,11 @@ class TableTestCase(unittest.TestCase):
         self.assertEqual(2, len(d))
         self.assertEqual(d[1], [42, "0", None])
 
+        assert_array_nanequal(
+            d.metas,
+            np.array([[v.Unknown for v in d.domain.metas]] * 2,
+                     dtype=object))
+
     def test_append2(self):
         d = data.Table("iris")
         d.shuffle()
@@ -577,9 +604,6 @@ class TableTestCase(unittest.TestCase):
         self.assertEqual(d[-1], d[10])
 
         x = d[:50]
-        with self.assertRaises(ValueError):
-            x.append(d[50])
-
         x.ensure_copy()
         x.append(d[50])
         self.assertEqual(x[50], d[50])
@@ -592,7 +616,7 @@ class TableTestCase(unittest.TestCase):
         x.ensure_copy()
         d.extend(x)
         for i in range(5):
-            self.assertTrue(d[i] == d[-5 + i])
+            self.assertEqual(d[i], d[-5 + i])
 
         x = d[:5]
         with self.assertRaises(ValueError):
@@ -603,6 +627,15 @@ class TableTestCase(unittest.TestCase):
         x.extend(y)
         np.testing.assert_almost_equal(x[-2:, 1].X, y.X)
         self.assertEqual(np.isnan(x).sum(), 8)
+
+    def test_extend2(self):
+        d = data.Table("test3")
+        d.extend([[None] * 3,
+                  [None] * 3])
+        assert_array_nanequal(
+            d.metas,
+            np.array([[v.Unknown for v in d.domain.metas]] * 2,
+                     dtype=object))
 
     def test_copy(self):
         t = data.Table(np.zeros((5, 3)), np.arange(5), np.zeros((5, 3)))
@@ -629,7 +662,7 @@ class TableTestCase(unittest.TestCase):
         t3 = data.Table.concatenate((t1, t2))
         self.assertEqual(t3.domain.attributes, t1.domain.attributes + t2.domain.attributes)
         self.assertEqual(len(t3.domain.metas), 1)
-        self.assertEqual(t3.X.shape, (2,2))
+        self.assertEqual(t3.X.shape, (2, 2))
         self.assertRaises(ValueError, lambda: data.Table.concatenate((t3, t1)))
 
         t4 = data.Table.concatenate((t3, t3), axis=0)
@@ -822,20 +855,17 @@ class TableTestCase(unittest.TestCase):
         else:
             self.fail("Filter returns too uneven distributions")
 
-    def test_filter_same_value(self):
-        d = data.Table("zoo")
-        mind = d.domain["type"].to_val("mammal")
-        lind = d.domain["legs"].to_val("4")
-        gind = d.domain["name"].to_val("girl")
-        for pos, val, r in (("type", "mammal", mind),
-                            (len(d.domain.attributes), mind, mind),
-                            ("legs", lind, lind),
-                            ("name", "girl", gind)):
-            e = filter.SameValue(pos, val)(d)
-            f = filter.SameValue(pos, val, negate=True)(d)
-            self.assertEqual(len(e) + len(f), len(d))
-            self.assertTrue(all(ex[pos] == r for ex in e))
-            self.assertTrue(all(ex[pos] != r for ex in f))
+    def test_filter_values_nested(self):
+        d = data.Table("iris")
+        f1 = filter.FilterContinuous(d.columns.sepal_length,
+                                     filter.FilterContinuous.Between,
+                                     min=4.5, max=5.0)
+        f2 = filter.FilterContinuous(d.columns.sepal_width,
+                                     filter.FilterContinuous.Between,
+                                     min=3.1, max=3.4)
+        f3 = filter.FilterDiscrete(d.columns.iris, [0, 1])
+        f = filter.Values([filter.Values([f1, f2], conjunction=False), f3])
+        self.assertEqual(41, len(f(d)))
 
     def test_filter_value_continuous(self):
         d = data.Table("iris")
@@ -847,7 +877,7 @@ class TableTestCase(unittest.TestCase):
                                     min=4.5, max=5.1)
 
         x = filter.Values([f])(d)
-        self.assertTrue(np.all(4.5 <= x.X[:, 2]))
+        self.assertTrue(np.all(x.X[:, 2] >= 4.5))
         self.assertTrue(np.all(x.X[:, 2] <= 5.1))
         self.assertEqual(sum((col >= 4.5) * (col <= 5.1)), len(x))
 
@@ -954,7 +984,7 @@ class TableTestCase(unittest.TestCase):
 
         f.values = ["mammal"]
         for e in filter.Values([f])(d):
-            self.assertTrue(e.get_class() == "mammal")
+            self.assertEqual(e.get_class(), "mammal")
 
         f = filter.FilterDiscrete(d.domain.class_var, values=[2, "mammal"])
         for e in filter.Values([f])(d):
@@ -972,6 +1002,12 @@ class TableTestCase(unittest.TestCase):
 
         d[:5, v.hair] = Unknown
         self.assertEqual(len(filter.Values([f])(d)), len(d) - 5)
+
+    def test_valueFilter_string_is_defined(self):
+        d = data.Table("test9.tab")
+        f = filter.FilterString(-5, filter.FilterString.IsDefined)
+        x = filter.Values([f])(d)
+        self.assertEqual(len(x), 7)
 
     def test_valueFilter_string_case_sens(self):
         d = data.Table("zoo")
@@ -1012,7 +1048,7 @@ class TableTestCase(unittest.TestCase):
         f.oper = f.Between
         f.max = "lion"
         x = filter.Values([f])(d)
-        self.assertEqual(len(x), sum(("girl" <= col) * (col <= "lion")))
+        self.assertEqual(len(x), sum((col >= "girl") * (col <= "lion")))
         self.assertTrue(np.all(x.metas >= "girl"))
         self.assertTrue(np.all(x.metas <= "lion"))
 
@@ -1116,6 +1152,7 @@ class TableTestCase(unittest.TestCase):
         x = filter.Values([f])(d)
         for e in x:
             self.assertTrue(str(e["name"]).endswith("ion"))
+            self.assertTrue(str(e["name"]).endswith("ion"))
         self.assertEqual(len(x), len([e for e in col if e.endswith("ion")]))
 
     def test_valueFilter_regex(self):
@@ -1136,9 +1173,18 @@ class TableTestCase(unittest.TestCase):
                                            table_metas.domain.metas,
                                            table_metas.domain.metas),
                                table_metas)
-        self.assertTrue(new_table.X.dtype == np.float64)
-        self.assertTrue(new_table.Y.dtype == np.float64)
-        self.assertTrue(new_table.metas.dtype == np.float64)
+        self.assertEqual(new_table.X.dtype, np.float64)
+        self.assertEqual(new_table.Y.dtype, np.float64)
+        self.assertEqual(new_table.metas.dtype, np.float64)
+
+    def test_attributes(self):
+        table = data.Table("iris")
+        self.assertEqual(table.attributes, {})
+        table.attributes[1] = "test"
+        table2 = table[:4]
+        self.assertEqual(table2.attributes[1], "test")
+        table2.attributes[1] = "modified"
+        self.assertEqual(table.attributes[1], "modified")
 
     # TODO Test conjunctions and disjunctions of conditions
 
@@ -1167,7 +1213,7 @@ class TableTests(unittest.TestCase):
         if len(self.class_vars) == 1:
             self.class_data = self.class_data.flatten()
         self.meta_data = np.random.randint(0, 5, (self.nrows, len(self.metas))
-                                           ).astype(object)
+                                          ).astype(object)
         self.weight_data = np.random.random((self.nrows, 1))
 
     def mock_domain(self, with_classes=False, with_metas=False):
@@ -1207,27 +1253,17 @@ class CreateTableWithFilename(TableTests):
     filename = "data.tab"
 
     @patch("os.path.exists", Mock(return_value=True))
-    @patch("Orange.data.io.TabFormat")
-    def test_read_data_calls_reader(self, reader_mock):
-        table_mock = Mock(data.Table)
-        reader_instance = reader_mock.return_value = \
-            Mock(read_file=Mock(return_value=table_mock))
-
-        table = data.Table.from_file(self.filename)
-
-        reader_instance.read_file.assert_called_with(self.filename, data.Table)
-        self.assertEqual(table, table_mock)
-
-    @patch("os.path.exists", Mock(return_value=True))
     def test_read_data_calls_reader(self):
         table_mock = Mock(data.Table)
-        reader_instance = Mock(read_file=Mock(return_value=table_mock))
+        reader_instance = Mock(read=Mock(return_value=table_mock))
+        reader_mock = Mock(return_value=reader_instance)
 
         with patch.dict(data.io.FileFormat.readers,
-                        {'.xlsx': reader_instance}):
+                        {'.xlsx': reader_mock}):
             table = data.Table.from_file("test.xlsx")
 
-        reader_instance.read_file.assert_called_with("test.xlsx", None)
+        reader_mock.assert_called_with("test.xlsx")
+        reader_instance.read.assert_called_with()
         self.assertEqual(table, table_mock)
 
     @patch("os.path.exists", Mock(return_value=False))
@@ -1262,12 +1298,14 @@ class CreateTableWithUrl(TableTests):
         np.testing.assert_array_equal(d1.Y, d2.Y)
 
     class _MockUrlOpen(MagicMock):
-        headers = {'content-disposition':
-            'attachment; filename="Something-FormResponses.tsv"; '
-            'filename*=UTF-8''Something%20%28Responses%29.tsv'}
+        headers = {'content-disposition': 'attachment; filename="Something-FormResponses.tsv"; '
+                                          'filename*=UTF-8''Something%20%28Responses%29.tsv'}
         url = 'https://docs.google.com/spreadsheets/d/ABCD/edit'
+
         def __enter__(self): return self
+
         def __exit__(self, *args, **kwargs): pass
+
         def read(self): return b'''\
 a\tb\tc
 1\t2\t3
@@ -1275,10 +1313,11 @@ a\tb\tc
 
     urlopen = _MockUrlOpen()
 
-    @patch('Orange.data.table.urlopen', urlopen)
+    @patch('Orange.data.io.urlopen', urlopen)
     def test_google_sheets(self):
         d = data.Table(self.urlopen.url)
-        self.urlopen.assert_called_with('https://docs.google.com/spreadsheets/d/ABCD/export?format=tsv', timeout=10)
+        self.urlopen.assert_called_with('https://docs.google.com/spreadsheets/d/ABCD/export?format=tsv',
+                                        timeout=10)
         self.assertEqual(len(d), 2)
         self.assertEqual(d.name, 'Something-FormResponses')
 
@@ -1695,6 +1734,24 @@ class CreateTableWithDomainAndTable(TableTests):
         self.assert_table_with_filter_matches(
             new_table, self.table[:0], xcols=order, ycols=order, mcols=order)
 
+    def test_from_table_on_sparse_data(self):
+        iris = data.Table("iris")
+        iris.X = csr_matrix(iris.X)
+
+        new_domain = data.domain.Domain(iris.domain.attributes[:2], iris.domain.class_vars,
+                                        iris.domain.metas, source=iris.domain)
+        new_iris = data.Table.from_table(new_domain, iris)
+        self.assertTrue(issparse(new_iris.X))
+        self.assertEqual(new_iris.X.shape[1], 2)
+        self.assertEqual(len(new_iris.domain.attributes), 2)
+
+        all_vars = chain(iris.domain.variables, iris.domain.metas)
+        n_all = len(iris.domain) + len(iris.domain.metas)
+        new_domain = data.domain.Domain([], [], all_vars, source=iris.domain)
+        new_iris = data.Table.from_table(new_domain, iris)
+        self.assertEqual(len(new_iris.domain.metas), n_all)
+        self.assertEqual(new_iris.metas.shape[1], n_all)
+
     def assert_table_with_filter_matches(
             self, new_table, old_table,
             rows=..., xcols=..., ycols=..., mcols=...):
@@ -1886,7 +1943,7 @@ class InterfaceTest(unittest.TestCase):
 
     class_vars = (
         data.ContinuousVariable(name="Continuous Class"),
-        data.DiscreteVariable(name="Discrete Class")
+        data.DiscreteVariable(name="Discrete Class", values=["m", "f"])
     )
 
     feature_data = (
@@ -1967,6 +2024,15 @@ class InterfaceTest(unittest.TestCase):
         for row, expected in zip(self.table[1:], self.data):
             self.assertEqual(tuple(row), expected)
 
+    def test_insert_view(self):
+        new_row = [1] * len(self.data[0])
+        tab = self.table[:2]
+        self.assertFalse(tab.is_copy())
+        tab.insert(0, new_row)
+        tab = data.Table.from_numpy(self.table.domain, self.table)
+        self.assertFalse(tab.X.flags.c_contiguous)
+        tab.insert(0, new_row)
+
     def test_delete_rows(self):
         for i in range(self.nrows):
             del self.table[0]
@@ -1978,6 +2044,19 @@ class InterfaceTest(unittest.TestCase):
         self.assertEqual(len(self.table), 0)
         for i in self.table:
             self.fail("Table should not contain any rows.")
+
+    def test_subclasses(self):
+        from pathlib import Path
+
+        class _ExtendedTable(data.Table):
+            pass
+
+        data_file = _ExtendedTable('iris')
+        data_url = _ExtendedTable.from_url(
+            Path(os.path.dirname(__file__), 'test1.tab').as_uri())
+
+        self.assertIsInstance(data_file, _ExtendedTable)
+        self.assertIsInstance(data_url, _ExtendedTable)
 
 
 class TestRowInstance(unittest.TestCase):

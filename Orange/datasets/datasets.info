@@ -251,6 +251,21 @@
             "values": 4
         }
     },
+    "conferences": {
+        "features": {
+            "continuous": 2,
+            "discrete": 1,
+            "meta": 2
+        },
+        "location": "conferences.tab",
+        "missing": false,
+        "name": "conferences",
+        "rows": 42,
+        "target": {
+            "type": false,
+            "values": null
+        }
+    },
     "crx": {
         "features": {
             "continuous": 6,
@@ -266,6 +281,21 @@
             "values": 2
         }
     },
+    "dermatology": {
+        "features": {
+            "continuous": 33,
+            "discrete": 1,
+            "meta": 0
+        },
+        "location": "dermatology.tab",
+        "missing": true,
+        "name": "dermatology",
+        "rows": 366,
+        "target": {
+            "type": "discrete",
+            "values": 6
+        }
+    },
     "echocardiogram": {
         "features": {
             "continuous": 8,
@@ -279,6 +309,21 @@
         "target": {
             "type": false,
             "values": null
+        }
+    },
+    "ecoli": {
+        "features": {
+            "continuous": 5,
+            "discrete": 2,
+            "meta": 1
+        },
+        "location": "ecoli.tab",
+        "missing": false,
+        "name": "ecoli",
+        "rows": 336,
+        "target": {
+            "type": "discrete",
+            "values": 8
         }
     },
     "emotions": {
@@ -1046,6 +1091,21 @@
         "target": {
             "type": "discrete",
             "values": 7
+        }
+    },
+    "zoo-with-images": {
+        "features": {
+            "continuous": 0,
+            "discrete": 5,
+            "meta": 2
+        },
+        "location": "zoo-with-images.tab",
+        "missing": false,
+        "name": "zoo-with-images",
+        "rows": 15,
+        "target": {
+            "type": "discrete",
+            "values": 3
         }
     }
 }

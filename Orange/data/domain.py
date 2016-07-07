@@ -57,6 +57,16 @@ class DomainConversion:
             else var.compute_value for var in destination.metas]
 
 
+def filter_visible(feats):
+    """
+    Args:
+        feats (iterable): Features to be filtered.
+
+    Returns: A filtered tuple of features that are visible (i.e. not hidden).
+    """
+    return (f for f in feats if not f.attributes.get('hidden', False))
+
+
 class Domain:
     def __init__(self, attributes, class_vars=None, metas=None, source=None):
         """
@@ -93,7 +103,7 @@ class Domain:
         for lst in (attributes, class_vars, metas):
             for i, var in enumerate(lst):
                 if not isinstance(var, Variable):
-                    if source and isinstance(var, (str, int)):
+                    if source is not None and isinstance(var, (str, int)):
                         lst[i] = source[var]
                     else:
                         raise TypeError(
@@ -286,7 +296,7 @@ class Domain:
 
     @property
     def has_continuous_class(self):
-        return self.class_var and self.class_var.is_continuous
+        return bool(self.class_var and self.class_var.is_continuous)
 
     @property
     def has_discrete_class(self):
@@ -385,7 +395,7 @@ class Domain:
             if col_idx.indices(s) == (0, s, 1):
                 return None, None
             else:
-                return (self.variables[col_idx],
+                return (self[col_idx],
                         np.arange(start, end, stride))
         elif isinstance(col_idx, Iterable) and not isinstance(col_idx, str):
             attributes = [self[col] for col in col_idx]

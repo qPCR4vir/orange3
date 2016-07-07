@@ -1,3 +1,15 @@
+"""
+Methods for scoring prediction results (CA, AUC, ...).
+
+Examples
+--------
+>>> import Orange
+>>> data = Orange.data.Table('iris')
+>>> learner = Orange.classification.LogisticRegressionLearner()
+>>> results = Orange.evaluation.TestOnTrainingData(data, [learner])
+
+"""
+
 import math
 import sys
 
@@ -29,11 +41,11 @@ class Score(metaclass=WrapperMeta):
             return self
 
     def __call__(self, results, **kwargs):
-        if not (self.separate_folds and results.folds):
-            return self.compute_score(results, **kwargs)
+        if self.separate_folds and results.score_by_folds and results.folds:
+            scores = self.scores_by_folds(results, **kwargs)
+            return self.average(scores)
 
-        scores = self.scores_by_folds(results, **kwargs)
-        return self.average(scores)
+        return self.compute_score(results, **kwargs)
 
     def average(self, scores):
         if self.is_scalar:
@@ -76,14 +88,16 @@ class Precision(Score):
     __wraps__ = skl_metrics.precision_score
 
     def compute_score(self, results):
-        return self.from_predicted(results, skl_metrics.precision_score)
+        return self.from_predicted(results, skl_metrics.precision_score,
+                                   average="weighted")
 
 
 class Recall(Score):
     __wraps__ = skl_metrics.recall_score
 
     def compute_score(self, results):
-        return self.from_predicted(results, skl_metrics.recall_score)
+        return self.from_predicted(results, skl_metrics.recall_score,
+                                   average="weighted")
 
 
 class F1(Score):
@@ -99,12 +113,9 @@ class F1(Score):
 
     Examples
     --------
-    >>> import Orange
-    >>> data = Orange.data.Table('iris')
-    >>> learner = Orange.classification.LogisticRegressionLearner()
-    >>> results = Orange.evaluation.TestOnTrainingData(data, [learner])
     >>> Orange.evaluation.F1(results)
-    array([ 0.9599359])
+    array([ 0.9...])
+
     """
     __wraps__ = skl_metrics.f1_score
 
@@ -208,12 +219,9 @@ class LogLoss(Score):
 
     Examples
     --------
-    >>> import Orange
-    >>> data = Orange.data.Table('iris')
-    >>> majority = Orange.classification.MajorityLearner()
-    >>> results = Orange.evaluation.TestOnTrainingData(data, [majority])
     >>> Orange.evaluation.LogLoss(results)
-    array([ 1.09861231])
+    array([ 0.3...])
+
     """
     __wraps__ = skl_metrics.log_loss
 

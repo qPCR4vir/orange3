@@ -5,7 +5,7 @@ ROC Analysis Widget
 """
 import operator
 from functools import reduce, wraps
-from collections import namedtuple, deque
+from collections import namedtuple, deque, OrderedDict
 
 import numpy
 import sklearn.metrics as skl_metrics
@@ -18,6 +18,7 @@ import Orange
 from Orange.widgets import widget, gui, settings
 from Orange.widgets.utils import colorpalette, colorbrewer
 from Orange.widgets.io import FileFormat
+from Orange.canvas import report
 
 
 #: Points on a ROC curve
@@ -273,8 +274,8 @@ class InfiniteLine(pg.InfiniteLine):
 
 class OWROCAnalysis(widget.OWWidget):
     name = "ROC Analysis"
-    description = "Display Receiver Operating Characteristics curve " \
-                  "based on evaluation of classifiers."
+    description = "Display the Receiver Operating Characteristics curve " \
+                  "based on the evaluation of classifiers."
     icon = "icons/ROCAnalysis.svg"
     priority = 1010
     inputs = [("Evaluation Results", Orange.evaluation.Results, "set_results")]
@@ -296,7 +297,7 @@ class OWROCAnalysis(widget.OWWidget):
     display_convex_hull = settings.Setting(False)
     display_convex_curve = settings.Setting(False)
 
-    want_graph = True
+    graph_name = "plot"
 
     def __init__(self):
         super().__init__()
@@ -310,36 +311,36 @@ class OWROCAnalysis(widget.OWWidget):
         self._rocch = None
         self._perf_line = None
 
-        box = gui.widgetBox(self.controlArea, "Plot")
-        tbox = gui.widgetBox(box, "Target Class")
+        box = gui.vBox(self.controlArea, "Plot")
+        tbox = gui.vBox(box, "Target Class")
         tbox.setFlat(True)
 
         self.target_cb = gui.comboBox(
             tbox, self, "target_index", callback=self._on_target_changed,
             contentsLength=8)
 
-        cbox = gui.widgetBox(box, "Classifiers")
+        cbox = gui.vBox(box, "Classifiers")
         cbox.setFlat(True)
         self.classifiers_list_box = gui.listBox(
             cbox, self, "selected_classifiers", "classifier_names",
             selectionMode=QtGui.QListView.MultiSelection,
             callback=self._on_classifiers_changed)
 
-        abox = gui.widgetBox(box, "Combine ROC Curves From Folds")
+        abox = gui.vBox(box, "Combine ROC Curves From Folds")
         abox.setFlat(True)
         gui.comboBox(abox, self, "roc_averaging",
-                     items=["Merge predictions from folds", "Mean TP rate",
-                            "Mean TP and FP at threshold", "Show individual curves"],
+                     items=["Merge Predictions from Folds", "Mean TP Rate",
+                            "Mean TP and FP at Threshold", "Show Individual Curves"],
                      callback=self._replot)
 
-        hbox = gui.widgetBox(box, "ROC Convex Hull")
+        hbox = gui.vBox(box, "ROC Convex Hull")
         hbox.setFlat(True)
         gui.checkBox(hbox, self, "display_convex_curve",
                      "Show convex ROC curves", callback=self._replot)
         gui.checkBox(hbox, self, "display_convex_hull",
                      "Show ROC convex hull", callback=self._replot)
 
-        box = gui.widgetBox(self.controlArea, "Analysis")
+        box = gui.vBox(self.controlArea, "Analysis")
 
         gui.checkBox(box, self, "display_def_threshold",
                      "Default threshold (0.5) point",
@@ -352,18 +353,18 @@ class OWROCAnalysis(widget.OWWidget):
 
         sp = gui.spin(box, self, "fp_cost", 1, 1000, 10,
                       callback=self._on_display_perf_line_changed)
-        grid.addWidget(QtGui.QLabel("FP Cost"), 0, 0)
+        grid.addWidget(QtGui.QLabel("FP Cost:"), 0, 0)
         grid.addWidget(sp, 0, 1)
 
         sp = gui.spin(box, self, "fn_cost", 1, 1000, 10,
                       callback=self._on_display_perf_line_changed)
-        grid.addWidget(QtGui.QLabel("FN Cost"))
+        grid.addWidget(QtGui.QLabel("FN Cost:"))
         grid.addWidget(sp, 1, 1)
         sp = gui.spin(box, self, "target_prior", 1, 99,
                       callback=self._on_display_perf_line_changed)
         sp.setSuffix("%")
         sp.addAction(QtGui.QAction("Auto", sp))
-        grid.addWidget(QtGui.QLabel("Prior target class probability"))
+        grid.addWidget(QtGui.QLabel("Prior target class probability:"))
         grid.addWidget(sp, 2, 1)
 
         self.plotview = pg.GraphicsView(background="w")
@@ -393,7 +394,6 @@ class OWROCAnalysis(widget.OWWidget):
 
         self.plotview.setCentralItem(self.plot)
         self.mainArea.layout().addWidget(self.plotview)
-        self.graphButton.clicked.connect(self.save_graph)
 
     def set_results(self, results):
         """Set the input evaluation results."""
@@ -402,7 +402,8 @@ class OWROCAnalysis(widget.OWWidget):
 
         if results is not None:
             if results.data is None:
-                self.error(0, "Give me data!!")
+                self.error(0, "Evaluation results require"
+                              " information on test data")
                 results = None
             elif not results.data.domain.has_discrete_class:
                 self.error(0, "Need discrete class variable")
@@ -613,12 +614,20 @@ class OWROCAnalysis(widget.OWWidget):
     def onDeleteWidget(self):
         self.clear()
 
-    def save_graph(self):
-        from Orange.widgets.data.owsave import OWSave
-
-        save_img = OWSave(data=self.plot,
-                          file_formats=FileFormat.img_writers)
-        save_img.exec_()
+    def send_report(self):
+        if self.results is None:
+            return
+        items = OrderedDict()
+        items["Target class"] = self.target_cb.currentText()
+        if self.display_perf_line:
+            items["Costs"] = \
+                "FP = {}, FN = {}".format(self.fp_cost, self.fn_cost)
+            items["Target probability"] = "{} %".format(self.target_prior)
+        caption = report.list_legend(self.classifiers_list_box,
+                                     self.selected_classifiers)
+        self.report_items(items)
+        self.report_plot()
+        self.report_caption(caption)
 
 
 def interp(x, xp, fp, left=None, right=None):

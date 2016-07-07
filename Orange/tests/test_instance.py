@@ -1,3 +1,6 @@
+# Test methods with long descriptive names can omit docstrings
+# pylint: disable=missing-docstring
+
 from math import isnan
 import warnings
 import unittest
@@ -12,19 +15,20 @@ from Orange.data import \
 
 
 class TestInstance(unittest.TestCase):
-    attributes = ["Feature %i" % i for i in range(10)]
-    class_vars = ["Class %i" % i for i in range(1)]
-    metas = [DiscreteVariable("Meta 1", values="XYZ"),
-             ContinuousVariable("Meta 2"),
-             StringVariable("Meta 3")]
+    @classmethod
+    def setUpClass(cls):
+        cls.attributes = ["Feature %i" % i for i in range(10)]
+        cls.class_vars = ["Class %i" % i for i in range(1)]
+        cls.metas = [DiscreteVariable("Meta 1", values="XYZ"),
+                     ContinuousVariable("Meta 2"),
+                     StringVariable("Meta 3")]
 
     def mock_domain(self, with_classes=False, with_metas=False):
-        attributes = self.attributes
         class_vars = self.class_vars if with_classes else []
         metas = self.metas if with_metas else []
-        variables = attributes + class_vars
+        variables = self.attributes + class_vars
         return MagicMock(Domain,
-                         attributes=attributes,
+                         attributes=self.attributes,
                          class_vars=class_vars,
                          metas=metas,
                          variables=variables)
@@ -73,7 +77,9 @@ class TestInstance(unittest.TestCase):
         self.assertTrue(all(isnan(x) for x in inst._y))
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", FutureWarning)
-            assert_array_equal(inst._metas, np.array([Unknown, Unknown, Unknown], dtype=object))
+            assert_array_equal(inst._metas,
+                               np.array([var.Unknown for var in domain.metas],
+                                        dtype=object))
 
     def test_init_x_arr(self):
         domain = self.create_domain(["x", DiscreteVariable("g", values="MF")])
@@ -88,7 +94,6 @@ class TestInstance(unittest.TestCase):
         self.assertEqual(inst._x.shape, (0, ))
         self.assertEqual(inst._y.shape, (0, ))
         self.assertEqual(inst._metas.shape, (0, ))
-
 
     def test_init_x_list(self):
         domain = self.create_domain(["x", DiscreteVariable("g", values="MF")])
@@ -118,7 +123,6 @@ class TestInstance(unittest.TestCase):
     def test_init_xy_list(self):
         domain = self.create_domain(["x", DiscreteVariable("g", values="MF")],
                                     [DiscreteVariable("y", values="ABC")])
-        lst = [42, "M", "C"]
         vals = np.array([42, 0, 2])
         inst = Instance(domain, vals)
         assert_array_equal(inst._x, vals[:2])
@@ -126,35 +130,21 @@ class TestInstance(unittest.TestCase):
         self.assertEqual(inst._y[0], 2)
         self.assertEqual(inst._metas.shape, (0, ))
 
-    def test_init_xym_arr(self):
+    def test_init_xym(self):
         domain = self.create_domain(["x", DiscreteVariable("g", values="MF")],
                                     [DiscreteVariable("y", values="ABC")],
                                     self.metas)
-        vals = np.array([42, "M", "B", "X", 43, "Foo"], dtype=object)
-        inst = Instance(domain, vals)
-        self.assertIsInstance(inst, Instance)
-        self.assertIs(inst.domain, domain)
-        self.assertEqual(inst._x.shape, (2, ))
-        self.assertEqual(inst._y.shape, (1, ))
-        self.assertEqual(inst._metas.shape, (3, ))
-        assert_array_equal(inst._x, np.array([42, 0]))
-        self.assertEqual(inst._y[0], 1)
-        assert_array_equal(inst._metas, np.array([0, 43, "Foo"], dtype=object))
-
-    def test_init_xym_list(self):
-        domain = self.create_domain(["x", DiscreteVariable("g", values="MF")],
-                                    [DiscreteVariable("y", values="ABC")],
-                                    self.metas)
-        vals = [42, "M", "B", "X", 43, "Foo"]
-        inst = Instance(domain, vals)
-        self.assertIsInstance(inst, Instance)
-        self.assertIs(inst.domain, domain)
-        self.assertEqual(inst._x.shape, (2, ))
-        self.assertEqual(inst._y.shape, (1, ))
-        self.assertEqual(inst._metas.shape, (3, ))
-        assert_array_equal(inst._x, np.array([42, 0]))
-        self.assertEqual(inst._y[0], 1)
-        assert_array_equal(inst._metas, np.array([0, 43, "Foo"], dtype=object))
+        for val in (np.array([42, "M", "B", "X", 43, "Foo"], dtype=object),
+                    [42, "M", "B", "X", 43, "Foo"]):
+            inst = Instance(domain, val)
+            self.assertIsInstance(inst, Instance)
+            self.assertIs(inst.domain, domain)
+            self.assertEqual(inst._x.shape, (2,))
+            self.assertEqual(inst._y.shape, (1,))
+            self.assertEqual(inst._metas.shape, (3,))
+            assert_array_equal(inst._x, np.array([42, 0]))
+            self.assertEqual(inst._y[0], 1)
+            assert_array_equal(inst._metas, np.array([0, 43, "Foo"], dtype=object))
 
     def test_init_inst(self):
         domain = self.create_domain(["x", DiscreteVariable("g", values="MF")],
@@ -185,30 +175,15 @@ class TestInstance(unittest.TestCase):
                                     self.metas)
         vals = [42, "M", "B", "X", 43, "Foo"]
         inst = Instance(domain, vals)
-
-        val = inst[0]
-        self.assertIsInstance(val, Value)
-        self.assertEqual(inst[0], 42)
-        self.assertEqual(inst["x"], 42)
-        self.assertEqual(inst[domain[0]], 42)
-
-        val = inst[1]
-        self.assertIsInstance(val, Value)
-        self.assertEqual(inst[1], "M")
-        self.assertEqual(inst["g"], "M")
-        self.assertEqual(inst[domain[1]], "M")
-
-        val = inst[2]
-        self.assertIsInstance(val, Value)
-        self.assertEqual(inst[2], "B")
-        self.assertEqual(inst["y"], "B")
-        self.assertEqual(inst[domain.class_var], "B")
-
-        val = inst[-2]
-        self.assertIsInstance(val, Value)
-        self.assertEqual(inst[-2], 43)
-        self.assertEqual(inst["Meta 2"], 43)
-        self.assertEqual(inst[self.metas[1]], 43)
+        for idx_int, idx_name, idx_var, value in ((0, "x", domain[0], 42),
+                                                  (1, "g", domain[1], "M"),
+                                                  (2, "y", domain.class_var, "B"),
+                                                  (-2, "Meta 2", self.metas[1], 43)):
+            val = inst[idx_int]
+            self.assertIsInstance(val, Value)
+            self.assertEqual(inst[idx_int], value)
+            self.assertEqual(inst[idx_name], value)
+            self.assertEqual(inst[idx_var], value)
 
         with self.assertRaises(ValueError):
             inst["asdf"] = 42
@@ -235,35 +210,23 @@ class TestInstance(unittest.TestCase):
         vals = [42, "M", "B", "X", 43, "Foo"]
         inst = Instance(domain, vals)
 
-        inst[0] = 43
-        self.assertEqual(inst[0], 43)
-        inst["x"] = 44
-        self.assertEqual(inst[0], 44)
-        inst[domain[0]] = 45
-        self.assertEqual(inst[0], 45)
+        for idx1, idx2, val in ((0, 0, 42),
+                                ("x", 0, 44),
+                                (1, 1, "F"),
+                                ("g", 1, "M"),
+                                (2, 2, "C"),
+                                ("y", 2, "A"),
+                                (domain.class_var, 2, "B"),
+                                (-1, -1, "Y"),
+                                ("Meta 1", -1, "Z"),
+                                (domain.metas[0], -1, "X")):
+            inst[idx1] = val
+            self.assertEqual(inst[idx2], val)
 
-        inst[1] = "F"
-        self.assertEqual(inst[1], "F")
-        inst["g"] = "M"
-        self.assertEqual(inst[1], "M")
         with self.assertRaises(ValueError):
             inst[1] = "N"
         with self.assertRaises(ValueError):
             inst["asdf"] = 42
-
-        inst[2] = "C"
-        self.assertEqual(inst[2], "C")
-        inst["y"] = "A"
-        self.assertEqual(inst[2], "A")
-        inst[domain.class_var] = "B"
-        self.assertEqual(inst[2], "B")
-
-        inst[-1] = "Y"
-        self.assertEqual(inst[-1], "Y")
-        inst["Meta 1"] = "Z"
-        self.assertEqual(inst[-1], "Z")
-        inst[domain.metas[0]] = "X"
-        self.assertEqual(inst[-1], "X")
 
     def test_str(self):
         domain = self.create_domain(["x", DiscreteVariable("g", values="MF")])
@@ -323,30 +286,19 @@ class TestInstance(unittest.TestCase):
         vals = [42, "M", "B", "X", 43, "Foo"]
         inst = Instance(domain, vals)
         inst2 = Instance(domain, vals)
-        self.assertTrue(inst == inst2)
-        self.assertTrue(inst2 == inst)
+        self.assertEqual(inst, inst2)
+        self.assertEqual(inst2, inst)
 
         inst2[0] = 43
-        self.assertFalse(inst == inst2)
+        self.assertNotEqual(inst, inst2)
 
         inst2[0] = Unknown
-        self.assertFalse(inst == inst2)
+        self.assertNotEqual(inst, inst2)
 
-        inst2 = Instance(domain, vals)
-        inst2[2] = "C"
-        self.assertFalse(inst == inst2)
-
-        inst2 = Instance(domain, vals)
-        inst2[-1] = "Y"
-        self.assertFalse(inst == inst2)
-
-        inst2 = Instance(domain, vals)
-        inst2[-2] = "33"
-        self.assertFalse(inst == inst2)
-
-        inst2 = Instance(domain, vals)
-        inst2[-3] = "Bar"
-        self.assertFalse(inst == inst2)
+        for index, val in ((2, "C"), (-1, "Y"), (-2, "33"), (-3, "Bar")):
+            inst2 = Instance(domain, vals)
+            inst2[index] = val
+            self.assertNotEqual(inst, inst2)
 
     def test_instance_id(self):
         domain = self.create_domain(["x"])

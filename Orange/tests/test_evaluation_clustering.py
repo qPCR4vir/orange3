@@ -1,3 +1,6 @@
+# Test methods with long descriptive names can omit docstrings
+# pylint: disable=missing-docstring
+
 import unittest
 
 import numpy as np
@@ -8,7 +11,7 @@ from Orange.evaluation.clustering import Silhouette, \
 from Orange.clustering.kmeans import KMeans
 
 
-class ClusteringEvaluation_Test(unittest.TestCase):
+class TestClusteringEvaluation(unittest.TestCase):
     def test_init(self):
         data = Orange.data.Table(np.arange(100).reshape((100, 1)))
         res = ClusteringResults(data=data, nmethods=2, nrows=100)

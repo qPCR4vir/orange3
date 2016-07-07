@@ -1,21 +1,31 @@
+"""
+Wrappers for controls used in widgets
+"""
+import contextlib
 import math
 import os
 import re
 import itertools
+import warnings
 from types import LambdaType
 
 import pkg_resources
-import numpy
 
-from PyQt4 import QtGui, QtCore, QtWebKit
+from PyQt4 import QtGui, QtCore
 from PyQt4.QtCore import Qt, pyqtSignal as Signal
-from PyQt4.QtGui import QCursor, QApplication
+from PyQt4.QtGui import QCursor, QApplication, QTableView, QHeaderView, \
+    QStyledItemDelegate, QSizePolicy, QColor
+
+# Some Orange widgets might expect this here
+from Orange.widgets.webview import WebView as WebviewWidget  # pylint: disable=unused-import
 
 import Orange.data
 from Orange.widgets.utils import getdeepattr
-from Orange.data import ContinuousVariable, StringVariable, DiscreteVariable, Variable
+from Orange.data import \
+    ContinuousVariable, StringVariable, TimeVariable, DiscreteVariable, Variable
 from Orange.widgets.utils import vartype
-from Orange.widgets.utils.constants import CONTROLLED_ATTRIBUTES, ATTRIBUTE_CONTROLLERS
+from Orange.widgets.utils.constants import \
+    CONTROLLED_ATTRIBUTES, ATTRIBUTE_CONTROLLERS
 from Orange.util import namegen
 
 YesNo = NoYes = ("No", "Yes")
@@ -28,6 +38,63 @@ OrangeUserRole = itertools.count(Qt.UserRole)
 LAMBDA_NAME = namegen('_lambda_')
 
 
+class TableView(QTableView):
+    """An auxilliary table view for use with PyTableModel in control areas"""
+    def __init__(self, parent=None, **kwargs):
+        kwargs = dict(
+            dict(showGrid=False,
+                 sortingEnabled=True,
+                 cornerButtonEnabled=False,
+                 alternatingRowColors=True,
+                 selectionBehavior=self.SelectRows,
+                 selectionMode=self.ExtendedSelection,
+                 horizontalScrollMode=self.ScrollPerPixel,
+                 verticalScrollMode=self.ScrollPerPixel,
+                 editTriggers=self.DoubleClicked | self.EditKeyPressed),
+            **kwargs)
+        super().__init__(parent, **kwargs)
+        h = self.horizontalHeader()
+        h.setCascadingSectionResizes(True)
+        h.setMinimumSectionSize(-1)
+        h.setStretchLastSection(True)
+        h.setResizeMode(QHeaderView.ResizeToContents)
+        v = self.verticalHeader()
+        v.setVisible(False)
+        v.setResizeMode(QHeaderView.ResizeToContents)
+
+    class BoldFontDelegate(QStyledItemDelegate):
+        """Paints the text of associated cells in bold font.
+
+        Can be used e.g. with QTableView.setItemDelegateForColumn() to make
+        certain table columns bold, or if callback is provided, the item's
+        model index is passed to it, and the item is made bold only if the
+        callback returns true.
+
+        Parameters
+        ----------
+        parent: QObject
+            The parent QObject.
+        callback: callable
+            Accepts model index and returns True if the item is to be
+            rendered in bold font.
+        """
+        def __init__(self, parent=None, callback=None):
+            super().__init__(parent)
+            self._callback = callback
+
+        def paint(self, painter, option, index):
+            """Paint item text in bold font"""
+            if not callable(self._callback) or self._callback(index):
+                option.font.setWeight(option.font.Bold)
+            super().paint(painter, option, index)
+
+        def sizeHint(self, option, index):
+            """Ensure item size accounts for bold font width"""
+            if not callable(self._callback) or self._callback(index):
+                option.font.setWeight(option.font.Bold)
+            return super().sizeHint(option, index)
+
+
 def resource_filename(path):
     """
     Return a resource filename (package data) for path.
@@ -35,246 +102,29 @@ def resource_filename(path):
     return pkg_resources.resource_filename(__name__, path)
 
 
-class TableWidget(QtGui.QTableWidget):
-    """ An easy to use, row-oriented table widget """
-
-    ROW_DATA_ROLE = QtCore.Qt.UserRole + 1
-    ITEM_DATA_ROLE = ROW_DATA_ROLE + 1
-
-    class TableWidgetNumericItem(QtGui.QTableWidgetItem):
-        """TableWidgetItem that sorts numbers correctly!"""
-        def __lt__(self, other):
-            return (self.data(TableWidget.ITEM_DATA_ROLE) <
-                    other.data(TableWidget.ITEM_DATA_ROLE))
-
-    def selectionChanged(self, selected:[QtGui.QItemSelectionRange], deselected:[QtGui.QItemSelectionRange]):
-        """Override or monkey-patch this method to catch selection changes"""
-        super().selectionChanged(selected, deselected)
-
-    def __setattr__(self, attr, value):
-        """
-        The following selectionChanged magic ensures selectionChanged
-        slot, when monkey-patched, always calls the super's selectionChanged
-        first (--> avoids Qt quirks), and the user needs not care about that.
-        """
-        if attr == 'selectionChanged':
-            func = value
-            @QtCore.pyqtSlot(QtGui.QItemSelection, QtGui.QItemSelection)
-            def _f(selected, deselected):
-                super(self.__class__, self).selectionChanged(selected, deselected)
-                func(selected, deselected)
-            value = _f
-        self.__dict__[attr] = value
-
-    def _update_headers(func):
-        """Decorator to update certain table features after method calls"""
-        def _f(self, *args, **kwargs):
-            func(self, *args, **kwargs)
-            if self.col_labels is not None:
-                self.setHorizontalHeaderLabels(self.col_labels)
-            if self.row_labels is not None:
-                self.setVerticalHeaderLabels(self.row_labels)
-            if self.stretch_last_section:
-                self.horizontalHeader().setStretchLastSection(True)
-        return _f
-
-    @_update_headers
-    def __init__(self,
-                 parent=None,
-                 col_labels=None,
-                 row_labels=None,
-                 stretch_last_section=True,
-                 multi_selection=False,
-                 select_rows=False):
-        """
-        Parameters
-        ----------
-        parent: QObject
-            Parent QObject. If parent has layout(), this widget is added to it.
-        col_labels: list of str
-            Labels or [] (sequential numbers) or None (no horizontal header)
-        row_label: list_of_str
-            Labels or [] (sequential numbers) or None (no vertical header)
-        stretch_last_section: bool
-        multi_selection: bool
-            Single selection if False
-        select_rows: bool
-            If True, select whole rows instead of individual cells.
-        """
-        super().__init__(parent)
-        self._column_filter = {}
-        self.col_labels = col_labels
-        self.row_labels = row_labels
-        self.stretch_last_section = stretch_last_section
-        try: parent.layout().addWidget(self)
-        except (AttributeError, TypeError): pass
-        if col_labels is None:
-            self.horizontalHeader().setVisible(False)
-        if row_labels is None:
-            self.verticalHeader().setVisible(False)
-        if multi_selection:
-            self.setSelectionMode(self.MultiSelection)
-        if select_rows:
-            self.setSelectionBehavior(self.SelectRows)
-        self.setHorizontalScrollMode(self.ScrollPerPixel)
-        self.setVerticalScrollMode(self.ScrollPerPixel)
-        self.setEditTriggers(self.NoEditTriggers)
-        self.setAlternatingRowColors(True)
-        self.setShowGrid(False)
-        self.setSortingEnabled(True)
-
-    @_update_headers
-    def addRow(self, items:tuple, data=None):
-        """
-        Appends iterable of `items` as the next row, optionally setting row
-        data to `data`. Each item of `items` can be a string or tuple
-        (item_name, item_data) if individual, cell-data is required.
-        """
-        row_data = data
-        row = self.rowCount()
-        self.insertRow(row)
-        col_count = max(len(items), self.columnCount())
-        if col_count != self.columnCount():
-            self.setColumnCount(col_count)
-        for col, item_data in enumerate(items):
-            if isinstance(item_data, str):
-                name = item_data
-            elif hasattr(item_data, '__iter__') and len(item_data) == 2:
-                name, item_data = item_data
-            elif isinstance(item_data, float):
-                name = '{:.4f}'.format(item_data)
-            else:
-                name = str(item_data)
-            if isinstance(item_data, (float, int, numpy.number)):
-                item = self.TableWidgetNumericItem(name)
-            else:
-                item = QtGui.QTableWidgetItem(name)
-            item.setData(self.ITEM_DATA_ROLE, item_data)
-            if col in self._column_filter:
-                item = self._column_filter[col](item) or item
-            self.setItem(row, col, item)
-        self.resizeColumnsToContents()
-        self.resizeRowsToContents()
-        if row_data is not None:
-            self.setRowData(row, row_data)
-
-    def rowData(self, row:int):
-        return self.item(row, 0).data(self.ROW_DATA_ROLE)
-
-    def setRowData(self, row:int, data):
-        self.item(row, 0).setData(self.ROW_DATA_ROLE, data)
-
-    def setColumnFilter(self, item_filter_func, columns:int or list):
-        """
-        Pass item(s) at column(s) through `item_filter_func` before
-        insertion. Useful for setting specific columns to bold or similar.
-        """
-        try: iter(columns)
-        except TypeError: columns = [columns]
-        for i in columns:
-            self._column_filter[i] = item_filter_func
-
-    def clear(self):
-        super().clear()
-        self.setRowCount(0)
-        self.setColumnCount(0)
-
-    def selectFirstRow(self):
-        if self.rowCount() > 0:
-            self.selectRow(0)
-
-    def selectRowsWhere(self, col, value, n_hits=-1,
-                        flags=QtCore.Qt.MatchExactly, _select=True):
-        """
-        Select (also return) at most `n_hits` rows where column `col`
-        has value (``data()``) `value`.
-        """
-        model = self.model()
-        matches = model.match(model.index(0, col),
-                              self.ITEM_DATA_ROLE,
-                              value,
-                              n_hits,
-                              flags)
-        model = self.selectionModel()
-        selection_flag = model.Select if _select else model.Deselect
-        for index in matches:
-            if _select ^ model.isSelected(index):
-                model.select(index, selection_flag | model.Rows)
-        return matches
-
-    def deselectRowsWhere(self, col, value, n_hits=-1,
-                          flags=QtCore.Qt.MatchExactly):
-        """
-        Deselect (also return) at most `n_hits` rows where column `col`
-        has value (``data()``) `value`.
-        """
-        return self.selectRowsWhere(col, value, n_hits, flags, False)
-
-
-class WebviewWidget(QtWebKit.QWebView):
-    """WebKit window in a window"""
-    def __init__(self, parent=None, bridge=None, html=None, debug=None):
-        """
-        Parameters
-        ----------
-        parent: QObject
-            Parent QObject. If parent has layout(), this widget is added to it.
-        bridge: QObject
-            The "bridge" object exposed as ``window.pybridge`` in JavaScript.
-            Any bridge methods desired to be accessible from JS need to be
-            decorated ``@QtCore.pyqtSlot(<*args>, result=<type>)``.
-        html: str
-            HTML content to set in the webview.
-        debug: bool
-            If True, enable context menu and webkit inspector.
-        """
-        super().__init__(parent)
-        self.setSizePolicy(QtGui.QSizePolicy(QtGui.QSizePolicy.Expanding,
-                                             QtGui.QSizePolicy.Expanding))
-        self._bridge = bridge
-        try: parent.layout().addWidget(self)
-        except (AttributeError, TypeError): pass
-        settings = self.settings()
-        settings.setAttribute(settings.LocalContentCanAccessFileUrls, True)
-        if debug is None:
-            import logging
-            debug = logging.getLogger().level <= logging.DEBUG
-        if debug:
-            settings.setAttribute(settings.DeveloperExtrasEnabled, True)
-        else:
-            self.setContextMenuPolicy(QtCore.Qt.NoContextMenu)
-        if html:
-            self.setHtml(html)
-
-    def setContent(self, data, mimetype, url=''):
-        super().setContent(data, mimetype, QtCore.QUrl(url))
-        if self._bridge:
-            self.page().mainFrame().addToJavaScriptWindowObject('pybridge', self._bridge)
-
-    def setHtml(self, html, url=''):
-        self.setContent(html.encode('utf-8'), 'text/html', url)
-
-    def sizeHint(self):
-        return QtCore.QSize(600, 500)
-
-    def evalJS(self, javascript):
-        self.page().mainFrame().evaluateJavaScript(javascript)
-
-
 class ControlledAttributesDict(dict):
+    """
+    Dictionary with names of attributes for which the `master` needs to be
+    notified of their changes
+    """
     def __init__(self, master):
         super().__init__()
         self.master = master
 
     def __setitem__(self, key, value):
         if key not in self:
-            dict.__setitem__(self, key, [value])
+            super().__setitem__(key, [value])
         else:
-            dict.__getitem__(self, key).append(value)
+            super().__getitem__(key).append(value)
         set_controllers(self.master, key, self.master, "")
 
-callbacks = lambda obj: getattr(obj, CONTROLLED_ATTRIBUTES, {})
-subcontrollers = lambda obj: getattr(obj, ATTRIBUTE_CONTROLLERS, {})
+
+def callbacks(obj):
+    return getattr(obj, CONTROLLED_ATTRIBUTES, {})
+
+
+def subcontrollers(obj):
+    return getattr(obj, ATTRIBUTE_CONTROLLERS, {})
 
 
 def notify_changed(obj, name, value):
@@ -319,6 +169,10 @@ def set_controllers(obj, controlled_name, controller, prefix):
 
 
 class OWComponent:
+    """
+    Mixin for classes that are not derived from :obj:`Orange.widgets.OWWidget`
+    but still contain controlled attributes.
+    """
     def __init__(self, widget):
         setattr(self, CONTROLLED_ATTRIBUTES, ControlledAttributesDict(self))
 
@@ -332,7 +186,7 @@ class OWComponent:
 
 def miscellanea(control, box, parent,
                 addToLayout=True, stretch=0, sizePolicy=None, addSpace=False,
-                disabled=False, tooltip=None):
+                disabled=False, tooltip=None, **kwargs):
     """
     Helper function that sets various properties of the widget using a common
     set of arguments.
@@ -352,6 +206,11 @@ def miscellanea(control, box, parent,
 
     If `box` is the same as `parent` it is set to `None`; this is convenient
     because of the way complex controls are inserted.
+
+    Unused keyword arguments are assumed to be properties; with this `gui`
+    function mimic the behaviour of PyQt's constructors. For instance, if
+    `gui.lineEdit` is called with keyword argument `sizePolicy=some_policy`,
+    `miscallenea` will call `control.setSizePolicy(some_policy)`.
 
     :param control: the control, e.g. a `QCheckBox`
     :type control: PyQt4.QtGui.QWidget
@@ -374,6 +233,11 @@ def miscellanea(control, box, parent,
     :param sizePolicy: the size policy for the box or the control
     :type sizePolicy: PyQt4.QtQui.QSizePolicy
     """
+    for prop, val in kwargs.items():
+        if prop == "sizePolicy":
+            control.setSizePolicy(QSizePolicy(*val))
+        else:
+            getattr(control, "set" + prop[0].upper() + prop[1:])(val)
     if disabled:
         # if disabled==False, do nothing; it can be already disabled
         control.setDisabled(disabled)
@@ -388,31 +252,46 @@ def miscellanea(control, box, parent,
             box.layout().indexOf(control) == -1:
         box.layout().addWidget(control)
     if sizePolicy is not None:
+        if isinstance(sizePolicy, tuple):
+            sizePolicy = QSizePolicy(*sizePolicy)
         (box or control).setSizePolicy(sizePolicy)
     if addToLayout and parent and parent.layout() is not None:
         parent.layout().addWidget(box or control, stretch)
         _addSpace(parent, addSpace)
 
 
-def setLayout(widget, orientation):
+def _is_horizontal(orientation):
+    if isinstance(orientation, str):
+        warnings.warn("string literals for orientation are deprecated",
+                      DeprecationWarning)
+    elif isinstance(orientation, bool):
+        warnings.warn("boolean values for orientation are deprecated",
+                      DeprecationWarning)
+    return (orientation == Qt.Horizontal or
+            orientation == 'horizontal' or
+            not orientation)
+
+
+def setLayout(widget, layout):
     """
-    Set the layout of the widget according to orientation. Argument
-    `orientation` can be an instance of :obj:`~PyQt4.QtGui.QLayout`, in which
-    case is it used as it is. If `orientation` is `'vertical'` or `True`,
-    the layout is set to :obj:`~PyQt4.QtGui.QVBoxLayout`. If it is
-    `'horizontal'` or `False`, it is set to :obj:`~PyQt4.QtGui.QVBoxLayout`.
+    Set the layout of the widget.
+
+    If `layout` is given as `Qt.Vertical` or `Qt.Horizontal`, the function
+    sets the layout to :obj:`~PyQt4.QtGui.QVBoxLayout` or
+    :obj:`~PyQt4.QtGui.QVBoxLayout`.
 
     :param widget: the widget for which the layout is being set
     :type widget: PyQt4.QtGui.QWidget
-    :param orientation: orientation for the layout
-    :type orientation: str or bool or PyQt4.QtGui.QLayout
+    :param layout: layout
+    :type layout: `Qt.Horizontal`, `Qt.Vertical` or
+        instance of `PyQt4.QtGui.QLayout`
     """
-    if isinstance(orientation, QtGui.QLayout):
-        widget.setLayout(orientation)
-    elif orientation == 'horizontal' or not orientation:
-        widget.setLayout(QtGui.QHBoxLayout())
-    else:
-        widget.setLayout(QtGui.QVBoxLayout())
+    if not isinstance(layout, QtGui.QLayout):
+        if _is_horizontal(layout):
+            layout = QtGui.QHBoxLayout()
+        else:
+            layout = QtGui.QVBoxLayout()
+    widget.setLayout(layout)
 
 
 def _enterButton(parent, control, placeholder=True):
@@ -439,7 +318,9 @@ def _enterButton(parent, control, placeholder=True):
     if not _enter_icon:
         _enter_icon = QtGui.QIcon(
             os.path.dirname(__file__) + "/icons/Dlg_enter.png")
-    button = QtGui.QToolButton(parent)
+    button = QtGui.QPushButton(parent)
+    button.setAutoDefault(True)
+    button.setDefault(True)
     height = control.sizeHint().height()
     button.setFixedSize(height, height)
     button.setIcon(_enter_icon)
@@ -502,7 +383,7 @@ def rubber(widget):
     widget.layout().addStretch(100)
 
 
-def widgetBox(widget, box=None, orientation='vertical', margin=None, spacing=4,
+def widgetBox(widget, box=None, orientation=Qt.Vertical, margin=None, spacing=4,
               **misc):
     """
     Construct a box with vertical or horizontal layout, and optionally,
@@ -515,12 +396,9 @@ def widgetBox(widget, box=None, orientation='vertical', margin=None, spacing=4,
     :type widget: PyQt4.QtGui.QWidget or None
     :param box: tells whether the widget has a border, and its label
     :type box: int or str or None
-    :param orientation: orientation for the layout. If the argument is an
-        instance of :obj:`~PyQt4.QtGui.QLayout`, it is used as a layout. If
-        "horizontal" or false-ish, the layout is horizontal
-        (:obj:`~PyQt4.QtGui.QHBoxLayout`), otherwise vertical
-        (:obj:`~PyQt4.QtGui.QHBoxLayout`).
-    :type orientation: str, int or :obj:`PyQt4.QtGui.QLayout`
+    :param orientation: orientation of the box
+    :type orientation: `Qt.Horizontal`, `Qt.Vertical` or
+            instance of `PyQt4.QtGui.QLayout`
     :param sizePolicy: The size policy for the widget (default: None)
     :type sizePolicy: :obj:`~PyQt4.QtGui.QSizePolicy`
     :param margin: The margin for the layout. Default is 7 if the widget has
@@ -544,13 +422,21 @@ def widgetBox(widget, box=None, orientation='vertical', margin=None, spacing=4,
             margin = 0
     setLayout(b, orientation)
     b.layout().setSpacing(spacing)
-    b.layout().setMargin(margin)
+    b.layout().setContentsMargins(margin, margin, margin, margin)
     misc.setdefault('addSpace', bool(box))
     miscellanea(b, None, widget, **misc)
     return b
 
 
-def indentedBox(widget, sep=20, orientation="vertical", **misc):
+def hBox(*args, **kwargs):
+    return widgetBox(orientation=Qt.Horizontal, *args, **kwargs)
+
+
+def vBox(*args, **kwargs):
+    return widgetBox(orientation=Qt.Vertical, *args, **kwargs)
+
+
+def indentedBox(widget, sep=20, orientation=Qt.Vertical, **misc):
     """
     Creates an indented box. The function can also be used "on the fly"::
 
@@ -564,16 +450,17 @@ def indentedBox(widget, sep=20, orientation="vertical", **misc):
     :type widget: PyQt4.QtGui.QWidget
     :param sep: Indent size (default: 20)
     :type sep: int
-    :param orientation: layout of the inserted box; see :obj:`widgetBox` for
-        details
-    :type orientation: str, int or PyQt4.QtGui.QLayout
+    :param orientation: orientation of the inserted box
+    :type orientation: `Qt.Vertical` (default), `Qt.Horizontal` or
+            instance of `PyQt4.QtGui.QLayout`
     :return: Constructed box
     :rtype: PyQt4.QtGui.QGroupBox or PyQt4.QtGui.QWidget
     """
-    outer = widgetBox(widget, orientation=False, spacing=0)
+    outer = hBox(widget, spacing=0)
     separator(outer, sep, 0)
     indented = widgetBox(outer, orientation=orientation)
     miscellanea(indented, outer, widget, **misc)
+    indented.box = outer
     return indented
 
 
@@ -597,9 +484,8 @@ def widgetLabel(widget, label="", labelWidth=None, **misc):
     return lbl
 
 
-
 def label(widget, master, label, labelWidth=None, box=None,
-          orientation="vertical", **misc):
+          orientation=Qt.Vertical, **misc):
     """
     Construct a label that contains references to the master widget's
     attributes; when their values change, the label is updated.
@@ -619,11 +505,14 @@ def label(widget, master, label, labelWidth=None, box=None,
     :type label: str
     :param labelWidth: The width of the label (default: None)
     :type labelWidth: int
+    :param orientation: layout of the inserted box
+    :type orientation: `Qt.Vertical` (default), `Qt.Horizontal` or
+        instance of `PyQt4.QtGui.QLayout`
     :return: label
     :rtype: PyQt4.QtGui.QLabel
     """
     if box:
-        b = widgetBox(widget, box, orientation=None, addToLayout=False)
+        b = hBox(widget, box, addToLayout=False)
     else:
         b = widget
 
@@ -766,7 +655,7 @@ class DoubleSpinBoxWFocusOut(QtGui.QDoubleSpinBox):
 
 
 def spin(widget, master, value, minv, maxv, step=1, box=None, label=None,
-         labelWidth=None, orientation=None, callback=None,
+         labelWidth=None, orientation=Qt.Horizontal, callback=None,
          controlWidth=None, callbackOnReturn=False, checked=None,
          checkCallback=None, posttext=None, disabled=False,
          alignment=Qt.AlignLeft, keyboardTracking=True,
@@ -794,9 +683,9 @@ def spin(widget, master, value, minv, maxv, step=1, box=None, label=None,
     :type label: str
     :param labelWidth: optional label width (default: None)
     :type labelWidth: int
-    :param orientation: tells whether to put the label above (`"vertical"` or
-        `True`) or to the left (`"horizontal"` or `False`)
-    :type orientation: int or bool or str
+    :param orientation: tells whether to put the label above or to the left
+    :type orientation: `Qt.Horizontal` (default), `Qt.Vertical` or
+        instance of `PyQt4.QtGui.QLayout`
     :param callback: a function that is called when the value is entered; if
         :obj:`callbackOnReturn` is `True`, the function is called when the
         user commits the value by pressing Enter or clicking the icon
@@ -839,12 +728,12 @@ def spin(widget, master, value, minv, maxv, step=1, box=None, label=None,
     # sbox is the spinbox itself
     if box or label and not checked:
         b = widgetBox(widget, box, orientation, addToLayout=False)
-        hasHBox = orientation == 'horizontal' or not orientation
+        hasHBox = _is_horizontal(orientation)
     else:
         b = widget
         hasHBox = False
     if not hasHBox and (checked or callback and callbackOnReturn or posttext):
-        bi = widgetBox(b, orientation=0, addToLayout=False)
+        bi = hBox(b, addToLayout=False)
     else:
         bi = b
 
@@ -908,7 +797,7 @@ def spin(widget, master, value, minv, maxv, step=1, box=None, label=None,
 
 # noinspection PyTypeChecker
 def doubleSpin(widget, master, value, minv, maxv, step=1, box=None, label=None,
-               labelWidth=None, orientation=None, callback=None,
+               labelWidth=None, orientation=Qt.Horizontal, callback=None,
                controlWidth=None, callbackOnReturn=False, checked=None,
                checkCallback=None, posttext=None,
                alignment=Qt.AlignLeft, keyboardTracking=True,
@@ -960,7 +849,7 @@ def checkBox(widget, master, value, label, box=None,
     :rtype: PyQt4.QtGui.QCheckBox
     """
     if box:
-        b = widgetBox(widget, box, orientation=None, addToLayout=False)
+        b = hBox(widget, box, addToLayout=False)
     else:
         b = widget
     cbox = QtGui.QCheckBox(label, b)
@@ -1063,7 +952,7 @@ class LineEditWFocusOut(QtGui.QLineEdit):
 
 
 def lineEdit(widget, master, value, label=None, labelWidth=None,
-             orientation='vertical', box=None, callback=None,
+             orientation=Qt.Vertical, box=None, callback=None,
              valueType=str, validator=None, controlWidth=None,
              callbackOnType=False, focusInCallback=None,
              enterPlaceholder=False, **misc):
@@ -1080,9 +969,8 @@ def lineEdit(widget, master, value, label=None, labelWidth=None,
     :type label: str
     :param labelWidth: the width of the label
     :type labelWidth: int
-    :param orientation: tells whether to put the label above (`"vertical"` or
-        `True`) or to the left (`"horizontal"` or `False`)
-    :type orientation: int or bool or str
+    :param orientation: tells whether to put the label above or to the left
+    :type orientation: `Qt.Vertical` (default) or `Qt.Horizontal`
     :param box: tells whether the widget has a border, and its label
     :type box: int or str or None
     :param callback: a function that is called when the check box state is
@@ -1111,7 +999,7 @@ def lineEdit(widget, master, value, label=None, labelWidth=None,
         b = widgetBox(widget, box, orientation, addToLayout=False)
         if label is not None:
             widgetLabel(b, label, labelWidth)
-        hasHBox = orientation == 'horizontal' or not orientation
+        hasHBox = _is_horizontal(orientation)
     else:
         b = widget
         hasHBox = False
@@ -1124,7 +1012,7 @@ def lineEdit(widget, master, value, label=None, labelWidth=None,
             b.layout().addWidget(ledit)
     elif focusInCallback or callback and not callbackOnType:
         if not hasHBox:
-            outer = widgetBox(b, "", 0, addToLayout=(b is not widget))
+            outer = hBox(b, addToLayout=(b is not widget))
         else:
             outer = b
         ledit = LineEditWFocusOut(outer, callback, focusInCallback,
@@ -1186,8 +1074,8 @@ def button(widget, master, label, callback=None, width=None, height=None,
         activated on pressing Return.
     :type autoDefault: bool
     :param buttonType: the button type (default: `QPushButton`)
-    :type buttonType: PyQt4.QtGui.QAbstractButton
-    :rtype: PyQt4.QtGui.QAbstractButton
+    :type buttonType: PyQt4.QtGui.QPushButton
+    :rtype: PyQt4.QtGui.QPushButton
     """
     button = buttonType(widget)
     if label:
@@ -1276,6 +1164,8 @@ class __AttributeIconDict(dict):
                                     "D", (26, 150, 65)),
                                    (vartype(StringVariable()),
                                     "S", (0, 0, 0)),
+                                   (vartype(TimeVariable()),
+                                    "T", (68, 170, 255)),
                                    (-1, "?", (128, 128, 128))):
                 self[tpe] = createAttributePixmap(char, QtGui.QColor(*col))
         if key not in self:
@@ -1344,8 +1234,7 @@ def listBox(widget, master, value=None, labels=None, box=None, callback=None,
     :rtype: OrangeListBox
     """
     if box:
-        bg = widgetBox(widget, box,
-                       orientation="horizontal", addToLayout=False)
+        bg = hBox(widget, box, addToLayout=False)
     else:
         bg = widget
     lb = OrangeListBox(master, enableDragDrop, dragDropCallback,
@@ -1355,19 +1244,18 @@ def listBox(widget, master, value=None, labels=None, box=None, callback=None,
     lb.ogLabels = labels
     lb.ogMaster = master
 
-    if value is not None:
-        clist = getdeepattr(master, value)
-        if not isinstance(clist, ControlledList):
-            clist = ControlledList(clist, lb)
-            master.__setattr__(value, clist)
     if labels is not None:
         setattr(master, labels, getdeepattr(master, labels))
         if hasattr(master, CONTROLLED_ATTRIBUTES):
             getattr(master, CONTROLLED_ATTRIBUTES)[labels] = CallFrontListBoxLabels(lb)
     if value is not None:
-        setattr(master, value, getdeepattr(master, value))
-    connectControl(master, value, callback, lb.itemSelectionChanged,
-                   CallFrontListBox(lb), CallBackListBox(lb, master))
+        clist = getdeepattr(master, value)
+        if not isinstance(clist, (int, ControlledList)):
+            clist = ControlledList(clist, lb)
+            master.__setattr__(value, clist)
+        setattr(master, value, clist)
+        connectControl(master, value, callback, lb.itemSelectionChanged,
+                       CallFrontListBox(lb), CallBackListBox(lb, master))
 
     misc.setdefault('addSpace', True)
     miscellanea(lb, bg, widget, **misc)
@@ -1376,8 +1264,8 @@ def listBox(widget, master, value=None, labels=None, box=None, callback=None,
 
 # btnLabels is a list of either char strings or pixmaps
 def radioButtons(widget, master, value, btnLabels=(), tooltips=None,
-                      box=None, label=None, orientation='vertical',
-                      callback=None, **misc):
+                 box=None, label=None, orientation=Qt.Vertical,
+                 callback=None, **misc):
     """
     Construct a button group and add radio buttons, if they are given.
     The value with which the buttons synchronize is the index of selected
@@ -1399,8 +1287,9 @@ def radioButtons(widget, master, value, btnLabels=(), tooltips=None,
     :type label: str
     :param callback: a function that is called when the selection is changed
     :type callback: function
-    :param orientation: orientation of the layout in the box
-    :type orientation: int or str or QLayout
+    :param orientation: orientation of the box
+    :type orientation: `Qt.Vertical` (default), `Qt.Horizontal` or an
+        instance of `PyQt4.QtGui.QLayout`
     :rtype: PyQt4.QtQui.QButtonGroup
     """
     bg = widgetBox(widget, box, orientation, addToLayout=False)
@@ -1414,7 +1303,7 @@ def radioButtons(widget, master, value, btnLabels=(), tooltips=None,
     bg.ogValue = value
     bg.ogMaster = master
     for i, lab in enumerate(btnLabels):
-        appendRadioButton(bg, lab, tooltip=tooltips and tooltips[i])
+        appendRadioButton(bg, lab, tooltip=tooltips and tooltips[i], id=i + 1)
     connectControl(master, value, callback, bg.group.buttonClicked[int],
                    CallFrontRadioButtons(bg), CallBackRadioButton(bg, master))
     misc.setdefault('addSpace', bool(box))
@@ -1426,7 +1315,7 @@ radioButtonsInBox = radioButtons
 
 def appendRadioButton(group, label, insertInto=None,
                       disabled=False, tooltip=None, sizePolicy=None,
-                      addToLayout=True, stretch=0, addSpace=False):
+                      addToLayout=True, stretch=0, addSpace=False, id=None):
     """
     Construct a radio button and add it to the group. The group must be
     constructed with :obj:`radioButtonsInBox` since it adds additional
@@ -1454,7 +1343,10 @@ def appendRadioButton(group, label, insertInto=None,
     if not hasattr(group, "buttons"):
         group.buttons = []
     group.buttons.append(w)
-    group.group.addButton(w)
+    if id is None:
+        group.group.addButton(w)
+    else:
+        group.group.addButton(w, id)
     w.setChecked(getdeepattr(group.ogMaster, group.ogValue) == i)
 
     # miscellanea for this case is weird, so we do it here
@@ -1463,6 +1355,8 @@ def appendRadioButton(group, label, insertInto=None,
     if tooltip is not None:
         w.setToolTip(tooltip)
     if sizePolicy:
+        if isinstance(sizePolicy, tuple):
+            sizePolicy = QSizePolicy(*sizePolicy)
         w.setSizePolicy(sizePolicy)
     if addToLayout:
         dest = insertInto or group
@@ -1516,8 +1410,7 @@ def hSlider(widget, master, value, box=None, minValue=0, maxValue=10, step=1,
     :type intOnly: bool
     :rtype: :obj:`PyQt4.QtGui.QSlider` or :obj:`FloatSlider`
     """
-    sliderBox = widgetBox(widget, box, orientation="horizontal",
-                          addToLayout=False)
+    sliderBox = hBox(widget, box, addToLayout=False)
     if label:
         widgetLabel(sliderBox, label)
     sliderOrient = Qt.Vertical if vertical else Qt.Horizontal
@@ -1561,8 +1454,8 @@ def hSlider(widget, master, value, box=None, minValue=0, maxValue=10, step=1,
 
 
 def labeledSlider(widget, master, value, box=None,
-                 label=None, labels=(), labelFormat=" %d", ticks=False,
-                 callback=None, vertical=False, width=None, **misc):
+                  label=None, labels=(), labelFormat=" %d", ticks=False,
+                  callback=None, vertical=False, width=None, **misc):
     """
     Construct a slider with labels instead of numbers.
 
@@ -1589,8 +1482,7 @@ def labeledSlider(widget, master, value, box=None,
     :type width: int
     :rtype: :obj:`PyQt4.QtGui.QSlider`
     """
-    sliderBox = widgetBox(widget, box, orientation="horizontal",
-                          addToLayout=False)
+    sliderBox = hBox(widget, box, addToLayout=False)
     if label:
         widgetLabel(sliderBox, label)
     sliderOrient = Qt.Vertical if vertical else Qt.Horizontal
@@ -1664,10 +1556,9 @@ def valueSlider(widget, master, value, box=None, label=None,
     :rtype: :obj:`PyQt4.QtGui.QSlider`
     """
     if isinstance(labelFormat, str):
-        labelFormat = lambda x, f=labelFormat: f(x)
+        labelFormat = lambda x, f=labelFormat: f % x
 
-    sliderBox = widgetBox(widget, box, orientation="horizontal",
-                          addToLayout=False)
+    sliderBox = hBox(widget, box, addToLayout=False)
     if label:
         widgetLabel(sliderBox, label)
     slider_orient = Qt.Vertical if vertical else Qt.Horizontal
@@ -1710,8 +1601,9 @@ class OrangeComboBox(QtGui.QComboBox):
     A QtGui.QComboBox subclass extened to support bounded contents width hint.
     """
     def __init__(self, parent=None, maximumContentsLength=-1, **kwargs):
-        super().__init__(parent, **kwargs)
+        # Forward-declared for sizeHint()
         self.__maximumContentsLength = maximumContentsLength
+        super().__init__(parent, **kwargs)
 
     def setMaximumContentsLength(self, length):
         """
@@ -1765,7 +1657,7 @@ class OrangeComboBox(QtGui.QComboBox):
 # - can valueType be anything else than str?
 # - sendSelectedValue is not a great name
 def comboBox(widget, master, value, box=None, label=None, labelWidth=None,
-             orientation='vertical', items=(), callback=None,
+             orientation=Qt.Vertical, items=(), callback=None,
              sendSelectedValue=False, valueType=str,
              control2attributeDict=None, emptyString=None, editable=False,
              contentsLength=None, maximumContentsLength=25,
@@ -1788,8 +1680,9 @@ def comboBox(widget, master, value, box=None, label=None, labelWidth=None,
     :type value:  str
     :param box: tells whether the widget has a border, and its label
     :type box: int or str or None
-    :param orientation: orientation of the layout in the box
-    :type orientation: str or int or bool
+    :param orientation: tells whether to put the label above or to the left
+    :type orientation: `Qt.Horizontal` (default), `Qt.Vertical` or
+        instance of `PyQt4.QtGui.QLayout`
     :param label: a label that is inserted into the box
     :type label: str
     :param labelWidth: the width of the label
@@ -1872,6 +1765,7 @@ def comboBox(widget, master, value, box=None, label=None, labelWidth=None,
                 master, value, callback, combo.activated[int],
                 CallFrontComboBox(combo, None, control2attributeDict))
     miscellanea(combo, hb, widget, **misc)
+    combo.emptyString = emptyString
     return combo
 
 
@@ -1943,29 +1837,31 @@ class OrangeListBox(QtGui.QListWidget):
     def sizeHint(self):
         return self.size_hint
 
-    def dragEnterEvent(self, ev):
-        super().dragEnterEvent(ev)
+    def dragEnterEvent(self, event):
+        super().dragEnterEvent(event)
         if self.valid_data_callback:
-            self.valid_data_callback(ev)
-        elif isinstance(ev.source(), OrangeListBox):
-            ev.setDropAction(Qt.MoveAction)
-            ev.accept()
+            self.valid_data_callback(event)
+        elif isinstance(event.source(), OrangeListBox):
+            event.setDropAction(Qt.MoveAction)
+            event.accept()
         else:
-            ev.ignore()
+            event.ignore()
 
-    def dropEvent(self, ev):
-        ev.setDropAction(Qt.MoveAction)
-        super().dropEvent(ev)
+    def dropEvent(self, event):
+        event.setDropAction(Qt.MoveAction)
+        super().dropEvent(event)
 
         items = self.update_master()
-        if ev.source() is not self:
-            ev.source().update_master(exclude=items)
+        if event.source() is not self:
+            event.source().update_master(exclude=items)
 
         if self.drop_callback:
             self.drop_callback()
 
     def update_master(self, exclude=()):
-        control_list = [self.item(i).data(Qt.UserRole) for i in range(self.count()) if self.item(i).data(Qt.UserRole) not in exclude]
+        control_list = [self.item(i).data(Qt.UserRole)
+                        for i in range(self.count())
+                        if self.item(i).data(Qt.UserRole) not in exclude]
         if self.ogLabels:
             master_list = getattr(self.master, self.ogLabels)
 
@@ -1989,7 +1885,7 @@ class OrangeListBox(QtGui.QListWidget):
 # eliminated?
 class SmallWidgetButton(QtGui.QPushButton):
     def __init__(self, widget, text="", pixmap=None, box=None,
-                 orientation='vertical', autoHideWidget=None, **misc):
+                 orientation=Qt.Vertical, autoHideWidget=None, **misc):
         #self.parent = parent
         if pixmap is not None:
             iconDir = os.path.join(os.path.dirname(__file__), "icons")
@@ -2016,8 +1912,8 @@ class SmallWidgetButton(QtGui.QPushButton):
         self.autohideWidget.hide()
         miscellanea(self, self.widget, widget, **misc)
 
-    def mousePressEvent(self, ev):
-        super().mousePressEvent(ev)
+    def mousePressEvent(self, event):
+        super().mousePressEvent(event)
         if self.autohideWidget.isVisible():
             self.autohideWidget.hide()
         else:
@@ -2028,7 +1924,7 @@ class SmallWidgetButton(QtGui.QPushButton):
 
 class SmallWidgetLabel(QtGui.QLabel):
     def __init__(self, widget, text="", pixmap=None, box=None,
-                 orientation='vertical', **misc):
+                 orientation=Qt.Vertical, **misc):
         super().__init__(widget)
         if text:
             self.setText("<font color=\"#C10004\">" + text + "</font>")
@@ -2051,8 +1947,8 @@ class SmallWidgetLabel(QtGui.QLabel):
         self.autohideWidget.hide()
         miscellanea(self, self.widget, widget, **misc)
 
-    def mousePressEvent(self, ev):
-        super().mousePressEvent(ev)
+    def mousePressEvent(self, event):
+        super().mousePressEvent(event)
         if self.autohideWidget.isVisible():
             self.autohideWidget.hide()
         else:
@@ -2105,6 +2001,9 @@ class Searcher:
     def __init__(self, control, master):
         self.control = control
         self.master = master
+        self.allItems = []
+        self.lb = None
+        self.window = None
 
     def __call__(self):
         _s = QtGui.QStyle
@@ -2129,11 +2028,10 @@ class Searcher:
         le.returnPressed.connect(self.returnPressed)
         self.lb.itemClicked.connect(self.mouseClicked)
 
-    def textChanged(self, s):
-        s = str(s)
+    def textChanged(self, text):
         self.lb.clear()
         for i in self.allItems:
-            if s.lower() in i.lower():
+            if text.lower() in i.lower():
                 self.lb.insertItem(i)
 
     def returnPressed(self):
@@ -2163,7 +2061,7 @@ class Searcher:
 # TODO collapsableWidgetBox is used only in OWMosaicDisplay.py; (re)move
 class collapsableWidgetBox(QtGui.QGroupBox):
     def __init__(self, widget, box="", master=None, value="",
-                 orientation="vertical", callback=None):
+                 orientation=Qt.Vertical, callback=None):
         super().__init__(widget)
         self.setFlat(1)
         setLayout(self, orientation)
@@ -2221,7 +2119,7 @@ class widgetHider(QtGui.QWidget):
         if widgets:
             self.setWidgets(widgets)
 
-    def mousePressEvent(self, ev):
+    def mousePressEvent(self, event):
         self.master.__setattr__(self.value,
                                 not getdeepattr(self.master, self.value))
         self.makeConsistent()
@@ -2230,8 +2128,8 @@ class widgetHider(QtGui.QWidget):
         self.disables = list(widgets)
         self.makeConsistent()
 
-    def paintEvent(self, ev):
-        super().paintEvent(ev)
+    def paintEvent(self, event):
+        super().paintEvent(event)
         if self.pixmaps:
             pix = self.pixmaps[getdeepattr(self.master, self.value)]
             painter = QtGui.QPainter(self)
@@ -2271,9 +2169,9 @@ def auto_commit(widget, master, value, label, auto_label=None, box=True,
     :type master: OWWidget or OWComponent
     :param label: The button label
     :type label: str
-    :param label: The label used when auto-commit is on; default is
+    :param auto_label: The label used when auto-commit is on; default is
         `"Auto " + label`
-    :type label: str
+    :type auto_label: str
     :param commit: master's method to override ('commit' by default)
     :type commit: function
     :param callback: function to call whenever the checkbox's statechanged
@@ -2304,9 +2202,11 @@ def auto_commit(widget, master, value, label, auto_label=None, box=True,
     def do_commit():
         nonlocal dirty
         QApplication.setOverrideCursor(QCursor(Qt.WaitCursor))
-        commit()
-        QApplication.restoreOverrideCursor()
-        dirty = False
+        try:
+            commit()
+            dirty = False
+        finally:
+            QApplication.restoreOverrideCursor()
 
     dirty = False
     commit = commit or getattr(master, 'commit')
@@ -2317,29 +2217,29 @@ def auto_commit(widget, master, value, label, auto_label=None, box=True,
         if checkbox_label:
             auto_label = label
         else:
-            auto_label = "Auto " + label.lower() + " is on"
+            auto_label = label.title() + " Automatically"
     if isinstance(box, QtGui.QWidget):
         b = box
     else:
         if orientation is None:
-            orientation = bool(checkbox_label)
+            orientation = Qt.Vertical if checkbox_label else Qt.Horizontal
         b = widgetBox(widget, box=box, orientation=orientation,
                       addToLayout=False)
-        b.setSizePolicy(QtGui.QSizePolicy.Preferred, QtGui.QSizePolicy.Maximum)
+        b.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
 
     b.checkbox = cb = checkBox(b, master, value, checkbox_label,
                                callback=checkbox_toggled, tooltip=auto_label)
-    if checkbox_label and orientation == 'horizontal' or not orientation:
-        b.layout().insertSpacing(-1, 10)
-    cb.setSizePolicy(QtGui.QSizePolicy.Preferred, QtGui.QSizePolicy.Preferred)
+    if _is_horizontal(orientation):
+        b.layout().addSpacing(10)
+    cb.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
     b.button = btn = button(b, master, label, callback=lambda: do_commit())
     if not checkbox_label:
-        btn.setSizePolicy(QtGui.QSizePolicy.Expanding,
-                          QtGui.QSizePolicy.Preferred)
+        btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
     checkbox_toggled()
     setattr(master, commit_name, unconditional_commit)
-    miscellanea(b, widget, widget,
-                addToLayout=not isinstance(box, QtGui.QWidget), **misc)
+    misc['addToLayout'] = misc.get('addToLayout', True) and \
+                          not isinstance(box, QtGui.QWidget)
+    miscellanea(b, widget, widget, **misc)
     return b
 
 
@@ -2363,7 +2263,7 @@ class ControlledList(list):
     # TODO ControllgedList.item2name is probably never used
     def item2name(self, item):
         item = self.listBox.labels[item]
-        if type(item) is tuple:
+        if isinstance(item, tuple):
             return item[1]
         else:
             return item
@@ -2422,15 +2322,27 @@ def connectControl(master, value, f, signal,
     if cfunc:
         if signal:
             signal.connect(cfunc)
-        cfront.opposite = tuple(filter(None, (cback, cfunc)))
+        cfront.opposite = tuple(x for x in (cback, cfunc) if x)
     return cfront, cback, cfunc
+
+
+@contextlib.contextmanager
+def disable_opposite(obj):
+    opposite = getattr(obj, "opposite", None)
+    if opposite:
+        opposite.disabled += 1
+        try:
+            yield
+        finally:
+            if opposite:
+                opposite.disabled -= 1
 
 
 class ControlledCallback:
     def __init__(self, widget, attribute, f=None):
         self.widget = widget
         self.attribute = attribute
-        self.f = f
+        self.func = f
         self.disabled = 0
         if isinstance(widget, dict):
             return  # we can't assign attributes to dict
@@ -2441,23 +2353,13 @@ class ControlledCallback:
     def acyclic_setattr(self, value):
         if self.disabled:
             return
-        if self.f:
-            if self.f in (int, float) and (
+        if self.func:
+            if self.func in (int, float) and (
                     not value or isinstance(value, str) and value in "+-"):
-                value = self.f(0)
+                value = self.func(0)
             else:
-                value = self.f(value)
-        opposite = getattr(self, "opposite", None)
-        if opposite:
-            try:
-                opposite.disabled += 1
-                if type(self.widget) is dict:
-                    self.widget[self.attribute] = value
-                else:
-                    setattr(self.widget, self.attribute, value)
-            finally:
-                opposite.disabled -= 1
-        else:
+                value = self.func(value)
+        with disable_opposite(self):
             if isinstance(self.widget, dict):
                 self.widget[self.attribute] = value
             else:
@@ -2469,13 +2371,7 @@ class ValueCallback(ControlledCallback):
     def __call__(self, value):
         if value is None:
             return
-        try:
-            self.acyclic_setattr(value)
-        except:
-            print("gui.ValueCallback: %s" % value)
-            import traceback
-            import sys
-            traceback.print_exception(*sys.exc_info())
+        self.acyclic_setattr(value)
 
 
 class ValueCallbackCombo(ValueCallback):
@@ -2497,15 +2393,9 @@ class ValueCallbackLineEdit(ControlledCallback):
     def __call__(self, value):
         if value is None:
             return
-        try:
-            pos = self.control.cursorPosition()
-            self.acyclic_setattr(value)
-            self.control.setCursorPosition(pos)
-        except:
-            print("invalid value ", value, type(value))
-            import traceback
-            import sys
-            traceback.print_exception(*sys.exc_info())
+        pos = self.control.cursorPosition()
+        self.acyclic_setattr(value)
+        self.control.setCursorPosition(pos)
 
 
 class SetLabelCallback:
@@ -2529,7 +2419,7 @@ class FunctionCallback:
     def __init__(self, master, f, widget=None, id=None, getwidget=False):
         self.master = master
         self.widget = widget
-        self.f = f
+        self.func = f
         self.id = id
         self.getwidget = getwidget
         if hasattr(master, "callbackDeposit"):
@@ -2543,11 +2433,11 @@ class FunctionCallback:
                 kwds['id'] = self.id
             if self.getwidget:
                 kwds['widget'] = self.widget
-            if isinstance(self.f, list):
-                for f in self.f:
-                    f(**kwds)
+            if isinstance(self.func, list):
+                for func in self.func:
+                    func(**kwds)
             else:
-                self.f(**kwds)
+                self.func(**kwds)
 
 
 class CallBackListBox:
@@ -2559,13 +2449,15 @@ class CallBackListBox:
     def __call__(self, *_):  # triggered by selectionChange()
         if not self.disabled and self.control.ogValue is not None:
             clist = getdeepattr(self.widget, self.control.ogValue)
-             # skip the overloaded method to avoid a cycle
-            list.__delitem__(clist, slice(0, len(clist)))
             control = self.control
-            for i in range(control.count()):
-                if control.item(i).isSelected():
-                    list.append(clist, i)
-            self.widget.__setattr__(self.control.ogValue, clist)
+            selection = [i for i in range(control.count())
+                         if control.item(i).isSelected()]
+            if isinstance(clist, int):
+                self.widget.__setattr__(
+                    self.control.ogValue, selection[0] if selection else None)
+            else:
+                list.__setitem__(clist, slice(0, len(clist)), selection)
+                self.widget.__setattr__(self.control.ogValue, clist)
 
 
 class CallBackRadioButton:
@@ -2715,13 +2607,17 @@ class CallFrontRadioButtons(ControlledCallFront):
 class CallFrontListBox(ControlledCallFront):
     def action(self, value):
         if value is not None:
-            if not isinstance(value, ControlledList):
-                setattr(self.control.ogMaster, self.control.ogValue,
-                        ControlledList(value, self.control))
-            for i in range(self.control.count()):
-                shouldBe = i in value
-                if shouldBe != self.control.item(i).isSelected():
-                    self.control.item(i).setSelected(shouldBe)
+            if isinstance(value, int):
+                for i in range(self.control.count()):
+                    self.control.item(i).setSelected(i == value)
+            else:
+                if not isinstance(value, ControlledList):
+                    setattr(self.control.ogMaster, self.control.ogValue,
+                            ControlledList(value, self.control))
+                for i in range(self.control.count()):
+                    shouldBe = i in value
+                    if shouldBe != self.control.item(i).isSelected():
+                        self.control.item(i).setSelected(shouldBe)
 
 
 class CallFrontListBoxLabels(ControlledCallFront):
@@ -2788,9 +2684,9 @@ class Disabler:
             else:
                 disabled = not getdeepattr(self.master, self.valueName)
         else:
-            disabled = 1
+            disabled = True
         for w in self.widget.disables:
-            if type(w) is tuple:
+            if isinstance(w, tuple):
                 if isinstance(w[0], int):
                     i = 1
                     if w[0] == -1:
@@ -2885,18 +2781,28 @@ class TableBarItem(QtGui.QItemDelegate):
                     not math.isnan(class_):
                 color = self.color_schema[int(class_)]
 
+        rect = option.rect
         if ratio is not None:
+            pw = 5
+            hmargin = 3 + pw / 2  # + half pen width for the round line cap
+            vmargin = 1
+            textoffset = pw + vmargin * 2
+            baseline = rect.bottom() - textoffset / 2
+            width = (rect.width() - 2 * hmargin) * ratio
             painter.save()
-            painter.setPen(QtGui.QPen(QtGui.QBrush(color), 5,
+            painter.setRenderHint(QtGui.QPainter.Antialiasing)
+            painter.setPen(QtGui.QPen(QtGui.QBrush(color), pw,
                                       Qt.SolidLine, Qt.RoundCap))
-            rect = option.rect.adjusted(3, 0, -3, -5)
-            x, y = rect.x(), rect.y() + rect.height()
-            painter.drawLine(x, y, x + rect.width() * ratio, y)
+            line = QtCore.QLineF(
+                rect.left() + hmargin, baseline,
+                rect.left() + hmargin + width, baseline
+            )
+            painter.drawLine(line)
             painter.restore()
-            text_rect = option.rect.adjusted(0, 0, 0, -3)
+            text_rect = rect.adjusted(0, 0, 0, -textoffset)
         else:
-            text_rect = option.rect
-        text = index.data(Qt.DisplayRole)
+            text_rect = rect
+        text = str(index.data(Qt.DisplayRole))
         self.drawDisplay(painter, option, text_rect, text)
         painter.restore()
 
@@ -3190,11 +3096,19 @@ class ColoredBarItemDelegate(QtGui.QStyledItemDelegate):
         return QtGui.QBrush(bar_brush)
 
 
+class HorizontalGridDelegate(QStyledItemDelegate):
+    def paint(self, painter, option, index):
+        painter.save()
+        painter.setPen(QColor(212, 212, 212))
+        painter.drawLine(option.rect.bottomLeft(), option.rect.bottomRight())
+        painter.restore()
+        QStyledItemDelegate.paint(self, painter, option, index)
+
+
 class VerticalLabel(QtGui.QLabel):
     def __init__(self, text, parent=None):
         super().__init__(text, parent)
-        self.setSizePolicy(QtGui.QSizePolicy.Preferred,
-                           QtGui.QSizePolicy.MinimumExpanding)
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.MinimumExpanding)
         self.setMaximumWidth(self.sizeHint().width() + 2)
         self.setMargin(4)
 
@@ -3280,13 +3194,15 @@ class ProgressBar:
         self.count = 0
         self.widget.progressBarInit()
 
+    def __del__(self):
+        self.finish()
+
     def advance(self, count=1):
         self.count += count
         self.widget.progressBarSet(int(self.count * 100 / max(1, self.iter)))
 
     def finish(self):
         self.widget.progressBarFinished()
-
 
 
 ##############################################################################
@@ -3298,18 +3214,18 @@ def tabWidget(widget):
     return w
 
 
-def createTabPage(tabWidget, name, widgetToAdd=None, canScroll=False):
+def createTabPage(tab_widget, name, widgetToAdd=None, canScroll=False):
     if widgetToAdd is None:
-        widgetToAdd = widgetBox(tabWidget, addToLayout=0, margin=4)
+        widgetToAdd = vBox(tab_widget, addToLayout=0, margin=4)
     if canScroll:
         scrollArea = QtGui.QScrollArea()
-        tabWidget.addTab(scrollArea, name)
+        tab_widget.addTab(scrollArea, name)
         scrollArea.setWidget(widgetToAdd)
         scrollArea.setWidgetResizable(1)
         scrollArea.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         scrollArea.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
     else:
-        tabWidget.addTab(widgetToAdd, name)
+        tab_widget.addTab(widgetToAdd, name)
     return widgetToAdd
 
 
@@ -3335,8 +3251,8 @@ class VisibleHeaderSectionContextEventFilter(QtCore.QObject):
 
         model = view.model()
         headers = [(view.isSectionHidden(i),
-                    model.headerData(i, view.orientation(), Qt.DisplayRole)
-                    ) for i in range(view.count())]
+                    model.headerData(i, view.orientation(), Qt.DisplayRole))
+                   for i in range(view.count())]
         menu = QtGui.QMenu("Visible headers", view)
 
         for i, (checked, name) in enumerate(headers):
@@ -3345,9 +3261,9 @@ class VisibleHeaderSectionContextEventFilter(QtCore.QObject):
             action.setChecked(not checked)
             menu.addAction(action)
 
-            def toogleHidden(b, section=i):
-                view.setSectionHidden(section, not b)
-                if not b:
+            def toogleHidden(visible, section=i):
+                view.setSectionHidden(section, not visible)
+                if not visible:
                     return
                 if self.itemView:
                     self.itemView.resizeColumnToContents(section)
@@ -3393,14 +3309,20 @@ def toolButtonSizeHint(button=None, style=None):
 
 
 class FloatSlider(QtGui.QSlider):
+    """
+    Slider for continuous values.
+
+    The slider is derived from `QtGui.QSlider`, but maps from its discrete
+    numbers to the desired continuous interval.
+    """
     valueChangedFloat = Signal(float)
 
     def __init__(self, orientation, min_value, max_value, step, parent=None):
         super().__init__(orientation, parent)
         self.setScale(min_value, max_value, step)
-        self.valueChanged[int].connect(self.sendValue)
+        self.valueChanged[int].connect(self._send_value)
 
-    def update(self):
+    def _update(self):
         self.setSingleStep(1)
         if self.min_value != self.max_value:
             self.setEnabled(True)
@@ -3409,15 +3331,29 @@ class FloatSlider(QtGui.QSlider):
         else:
             self.setEnabled(False)
 
-    def sendValue(self, slider_value):
+    def _send_value(self, slider_value):
         value = min(max(slider_value * self.step, self.min_value),
                     self.max_value)
         self.valueChangedFloat.emit(value)
 
     def setValue(self, value):
+        """
+        Set current value. The value is divided by `step`
+
+        Args:
+            value: new value
+        """
         super().setValue(value // self.step)
 
     def setScale(self, minValue, maxValue, step=0):
+        """
+        Set slider's ranges (compatibility with qwtSlider).
+
+        Args:
+            minValue (float): minimal value
+            maxValue (float): maximal value
+            step (float): step
+        """
         if minValue >= maxValue:
             ## It would be more logical to disable the slider in this case
             ## (self.setEnabled(False))
@@ -3432,9 +3368,17 @@ class FloatSlider(QtGui.QSlider):
         self.min_value = float(minValue)
         self.max_value = float(maxValue)
         self.step = step
-        self.update()
+        self._update()
 
     def setRange(self, minValue, maxValue, step=1.0):
+        """
+        Set slider's ranges (compatibility with qwtSlider).
+
+        Args:
+            minValue (float): minimal value
+            maxValue (float): maximal value
+            step (float): step
+        """
         # For compatibility with qwtSlider
         # TODO If it's related to Qwt, remove it
         self.setScale(minValue, maxValue, step)

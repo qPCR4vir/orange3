@@ -1,19 +1,22 @@
+import re
 from numbers import Number, Real, Integral
 from math import isnan, floor, sqrt
 import numpy as np
 from pickle import PickleError
+import copy
 
 import collections
+from datetime import datetime, timedelta, timezone
 
 from . import _variable
 
-from Orange.util import Registry
+from Orange.util import Registry, color_to_hex, hex_to_color
 
 
 # For storing unknowns
 Unknown = ValueUnknown = float("nan")
 # For checking for unknowns
-MISSING_VALUES = {"?", ".", "", "NA", "~", None}
+MISSING_VALUES = {np.nan, "?", "nan", ".", "", "NA", "~", None}
 
 DISCRETE_MAX_VALUES = 3  # == 2 + nan
 
@@ -54,7 +57,9 @@ def is_discrete_values(values):
             return False
 
     # Strip NaN from unique
-    unique = {i for i in unique if not (isinstance(i, Number) and np.isnan(i))}
+    unique = {i for i in unique
+              if (not i in MISSING_VALUES and
+                  not (isinstance(i, Number) and np.isnan(i)))}
 
     # All NaNs => indeterminate
     if not unique: return None
@@ -132,15 +137,16 @@ class Value(float):
         :type variable: Orange.data.Variable
         :param value: value
         """
-        if not isinstance(value, str):
-            try:
-                self = super().__new__(cls, value)
-            except:
-                self = super().__new__(cls, -1)
+        if variable.is_primitive():
+            self = super().__new__(cls, value)
+            self.variable = variable
+            self._value = None
         else:
-            self = super().__new__(cls, -1)
-        self._value = value
-        self.variable = variable
+            isunknown = value == variable.Unknown
+            self = super().__new__(
+                cls, np.nan if isunknown else np.finfo(float).min)
+            self.variable = variable
+            self._value = value
         return self
 
     def __init__(self, _, __=Unknown):
@@ -163,18 +169,42 @@ class Value(float):
             return self.value == other.value
         return super().__eq__(other)
 
+    def __ne__(self, other):
+        return not self.__eq__(other)
+
+    def __lt__(self, other):
+        if self.variable.is_primitive():
+            if isinstance(other, str):
+                return super().__lt__(self.variable.to_val(other))
+            else:
+                return super().__lt__(other)
+        else:
+            if isinstance(other, str):
+                return self.value < other
+            else:
+                return self.value < other.value
+
+    def __le__(self, other):
+        return self.__lt__(other) or self.__eq__(other)
+
+    def __gt__(self, other):
+        return not self.__le__(other)
+
+    def __ge__(self, other):
+        return not self.__lt__(other)
+
     def __contains__(self, other):
-        if (self.value is not None
-                and isinstance(self.value, str)
+        if (self._value is not None
+                and isinstance(self._value, str)
                 and isinstance(other, str)):
-            return other in self.value
+            return other in self._value
         raise TypeError("invalid operation on Value()")
 
     def __hash__(self):
-        if self.value is None:
+        if self._value is None:
             return super().__hash__()
         else:
-            return super().__hash__() ^ hash(self.value)
+            return hash((super().__hash__(), self._value))
 
     @property
     def value(self):
@@ -231,6 +261,12 @@ class Variable(metaclass=VariableMeta):
     .. attribute:: attributes
 
         A dictionary with user-defined attributes of the variable
+
+    .. attribute:: master
+
+        The variable that this variable is a copy of. If a copy is made from a
+        copy, the copy has a reference to the original master. If the variable
+        is not a copy, it is its own master.
     """
     Unknown = ValueUnknown
 
@@ -243,11 +279,32 @@ class Variable(metaclass=VariableMeta):
         self.unknown_str = MISSING_VALUES
         self.source_variable = None
         self.attributes = {}
+        self.master = self
         if name and compute_value is None:
             if isinstance(self._all_vars, collections.defaultdict):
                 self._all_vars[name].append(self)
             else:
                 self._all_vars[name] = self
+        self._colors = None
+
+    def make_proxy(self):
+        """
+        Copy the variable and set the master to `self.master` or to `self`.
+
+        :return: copy of self
+        :rtype: Variable
+        """
+        var = self.__class__()
+        var.__dict__.update(self.__dict__)
+        var.master = self.master
+        return var
+
+    def __eq__(self, other):
+        """Two variables are equivalent if the originate from the same master"""
+        return hasattr(other, "master") and self.master is other.master
+
+    def __hash__(self):
+        return super().__hash__()
 
     @classmethod
     def make(cls, name):
@@ -280,7 +337,7 @@ class Variable(metaclass=VariableMeta):
         `True` if the variable's values are stored as floats.
         Non-primitive variables can appear in the data only as meta attributes.
         """
-        return cls in (DiscreteVariable, ContinuousVariable)
+        return issubclass(cls, (DiscreteVariable, ContinuousVariable))
 
     @property
     def is_discrete(self):
@@ -364,7 +421,9 @@ class Variable(metaclass=VariableMeta):
         return make_variable, (self.__class__, self._compute_value, self.name), self.__dict__
 
     def copy(self, compute_value):
-        return Variable(self.name, compute_value)
+        var = Variable(self.name, compute_value)
+        var.attributes = dict(self.attributes)
+        return var
 
 
 class ContinuousVariable(Variable):
@@ -409,6 +468,22 @@ class ContinuousVariable(Variable):
     def number_of_decimals(self):
         return self._number_of_decimals
 
+    @property
+    def colors(self):
+        if self._colors is None:
+            if "colors" in self.attributes:
+                col1, col2, black = self.attributes["colors"]
+                self._colors = (hex_to_color(col1), hex_to_color(col2), black)
+            else:
+                self._colors = ((0, 0, 255), (255, 255, 0), False)
+        return self._colors
+
+    @colors.setter
+    def colors(self, value):
+        col1, col2, black = self._colors = value
+        self.attributes["colors"] = \
+            [color_to_hex(col1), color_to_hex(col2), black]
+
     # noinspection PyAttributeOutsideInit
     @number_of_decimals.setter
     def number_of_decimals(self, x):
@@ -442,7 +517,9 @@ class ContinuousVariable(Variable):
     str_val = repr_val
 
     def copy(self, compute_value=None):
-        return ContinuousVariable(self.name, self.number_of_decimals, compute_value)
+        var = ContinuousVariable(self.name, self.number_of_decimals, compute_value)
+        var.attributes = dict(self.attributes)
+        return var
 
 
 class DiscreteVariable(Variable):
@@ -480,6 +557,33 @@ class DiscreteVariable(Variable):
         self.ordered = ordered
         self.values = list(values)
         self.base_value = base_value
+
+    @property
+    def colors(self):
+        if self._colors is None:
+            if "colors" in self.attributes:
+                self._colors = np.array(
+                    [hex_to_color(col) for col in self.attributes["colors"]],
+                    dtype=np.uint8)
+            else:
+                from Orange.widgets.utils.colorpalette import \
+                    ColorPaletteGenerator
+                self._colors = ColorPaletteGenerator.palette(self)
+            self._colors.flags.writeable = False
+        return self._colors
+
+    @colors.setter
+    def colors(self, value):
+        self._colors = value
+        self._colors.flags.writeable = False
+        self.attributes["colors"] = [color_to_hex(col) for col in value]
+
+    def set_color(self, i, color):
+        self.colors = self.colors
+        self._colors.flags.writeable = True
+        self._colors[i, :] = color
+        self._colors.flags.writeable = False
+        self.attributes["colors"][i] = color_to_hex(color)
 
     def __repr__(self):
         """
@@ -672,11 +776,16 @@ class DiscreteVariable(Variable):
         for presorted in DiscreteVariable.presorted_values:
             if values == set(presorted):
                 return presorted
-        return sorted(values)
+        try:
+            return sorted(values, key=float)
+        except ValueError:
+            return sorted(values)
 
     def copy(self, compute_value=None):
-        return DiscreteVariable(self.name, self.values, self.ordered,
-                                self.base_value, compute_value)
+        var = DiscreteVariable(self.name, self.values, self.ordered,
+                               self.base_value, compute_value)
+        var.attributes = dict(self.attributes)
+        return var
 
 
 class StringVariable(Variable):
@@ -684,6 +793,7 @@ class StringVariable(Variable):
     Descriptor for string variables. String variables can only appear as
     meta attributes.
     """
+    Unknown = ""
     TYPE_HEADERS = ('string', 's', 'text')
 
     def to_val(self, s):
@@ -702,14 +812,177 @@ class StringVariable(Variable):
     @staticmethod
     def str_val(val):
         """Return a string representation of the value."""
-        if isinstance(val, Real) and isnan(val):
+        if val is "":
             return "?"
         if isinstance(val, Value):
-            if val.value is None:
-                return "None"
+            if val.value is "":
+                return "?"
             val = val.value
         return str(val)
 
     def repr_val(self, val):
         """Return a string representation of the value."""
         return '"{}"'.format(self.str_val(val))
+
+
+class TimeVariable(ContinuousVariable):
+    """
+    TimeVariable is a continuous variable with Unix epoch
+    (1970-01-01 00:00:00+0000) as the origin (0.0). Later dates are positive
+    real numbers (equivalent to Unix timestamp, with microseconds in the
+    fraction part), and the dates before it map to the negative real numbers.
+
+    Unfortunately due to limitation of Python datetime, only dates
+    with year >= 1 (A.D.) are supported.
+
+    If time is specified without a date, Unix epoch is assumed.
+
+    If time is specified wihout an UTC offset, localtime is assumed.
+    """
+    TYPE_HEADERS = ('time', 't')
+    UNIX_EPOCH = datetime(1970, 1, 1)
+    _ISO_FORMATS = [
+        # have_date, have_time, format_str
+        # in order of decreased probability
+        (1, 1, '%Y-%m-%d %H:%M:%S%z'),
+        (1, 1, '%Y-%m-%d %H:%M:%S'),
+        (1, 1, '%Y-%m-%d %H:%M'),
+        (1, 1, '%Y-%m-%dT%H:%M:%S%z'),
+        (1, 1, '%Y-%m-%dT%H:%M:%S'),
+
+        (1, 0, '%Y-%m-%d'),
+
+        (1, 1, '%Y-%m-%d %H:%M:%S.%f%z'),
+        (1, 1, '%Y-%m-%dT%H:%M:%S.%f%z'),
+
+        (1, 1, '%Y%m%dT%H%M%S%z'),
+        (1, 1, '%Y%m%d%H%M%S%z'),
+
+        (0, 1, '%H:%M:%S.%f'),
+        (0, 1, '%H:%M:%S'),
+        (0, 1, '%H:%M'),
+
+        # These parse as continuous features (plain numbers)
+        (1, 1, '%Y%m%dT%H%M%S'),
+        (1, 1, '%Y%m%d%H%M%S'),
+        (1, 0, '%Y%m%d'),
+        (1, 0, '%Y%j'),
+        (1, 0, '%Y'),
+        (0, 1, '%H%M%S.%f'),
+
+        # BUG: In Python as in C, %j doesn't necessitate 0-padding,
+        # so these two lines must be in this order
+        (1, 0, '%Y-%m'),
+        (1, 0, '%Y-%j'),
+    ]
+    # The regex that matches all above formats
+    REGEX = (r'^('
+             '\d{1,4}-\d{2}-\d{2}([ T]\d{2}:\d{2}(:\d{2}(\.\d+)?([+-]\d{4})?)?)?|'
+             '\d{1,4}\d{2}\d{2}(T?\d{2}\d{2}\d{2}([+-]\d{4})?)?|'
+             '\d{2}:\d{2}(:\d{2}(\.\d+)?)?|'
+             '\d{2}\d{2}\d{2}\.\d+|'
+             '\d{1,4}(-?\d{2,3})?'
+             ')$')
+    _matches_iso_format = re.compile(REGEX).match
+
+    # UTC offset and associated timezone. If parsed datetime values provide an
+    # offset, it is used for display. If not all values have the same offset,
+    # +0000 (=UTC) timezone is used and utc_offset is set to False.
+    utc_offset = None
+    timezone = timezone.utc
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.have_date = 0
+        self.have_time = 0
+
+    @staticmethod
+    def _tzre_sub(s, _subtz=re.compile(r'([+-])(\d\d):(\d\d)$').sub):
+        # Replace +ZZ:ZZ with ISO-compatible +ZZZZ, or strip +0000
+        return s[:-6] if s.endswith(('+00:00', '-00:00')) else _subtz(r'\1\2\3', s)
+
+    def repr_val(self, val):
+        if isnan(val):
+            return '?'
+        seconds = int(val)
+        microseconds = int(round((val - seconds) * 1e6))
+        if val < 0:
+            date = datetime.fromtimestamp(0, tz=self.timezone) + timedelta(seconds=seconds)
+        else:
+            date = datetime.fromtimestamp(seconds, tz=self.timezone)
+        date = str(date.replace(microsecond=microseconds))
+        if self.have_date and not self.have_time:
+            date = date.split()[0]
+        elif not self.have_date and self.have_time:
+            date = date.split()[1]
+        date = self._tzre_sub(date)
+        return date
+
+    str_val = repr_val
+
+    def parse(self, datestr):
+        """
+        Return `datestr`, a datetime provided in one of ISO 8601 formats,
+        parsed as a real number. Value 0 marks the Unix epoch, positive values
+        are the dates after it, negative before.
+
+        If date is unspecified, epoch date is assumed.
+
+        If time is unspecified, 00:00:00.0 is assumed.
+
+        If timezone is unspecified, local time is assumed.
+        """
+        if datestr in MISSING_VALUES:
+            return Unknown
+        datestr = datestr.strip().rstrip('Z')
+
+        ERROR = ValueError('Invalid datetime format. Only ISO 8601 supported.')
+        if not self._matches_iso_format(datestr):
+            try:
+                # If it is a number, assume it is a unix timestamp
+                return float(datestr)
+            except ValueError:
+                raise ERROR
+
+        for i, (have_date, have_time, fmt) in enumerate(self._ISO_FORMATS):
+            try:
+                dt = datetime.strptime(datestr, fmt)
+            except ValueError:
+                continue
+            else:
+                # Pop this most-recently-used format to front
+                if 0 < i < len(self._ISO_FORMATS) - 2:
+                    self._ISO_FORMATS[i], self._ISO_FORMATS[0] = \
+                        self._ISO_FORMATS[0], self._ISO_FORMATS[i]
+
+                self.have_date |= have_date
+                self.have_time |= have_time
+                if not have_date:
+                    dt = dt.replace(self.UNIX_EPOCH.year,
+                                    self.UNIX_EPOCH.month,
+                                    self.UNIX_EPOCH.day)
+                break
+        else:
+            raise ERROR
+
+        # Remember UTC offset. If not all parsed values share the same offset,
+        # remember none of it.
+        offset = dt.utcoffset()
+        if self.utc_offset is not False:
+            if offset and self.utc_offset is None:
+                self.utc_offset = offset
+                self.timezone = timezone(offset)
+            elif self.utc_offset != offset:
+                self.utc_offset = False
+                self.timezone = timezone.utc
+
+        # Convert time to UTC timezone. In dates without timezone,
+        # localtime is assumed. See also:
+        # https://docs.python.org/3.4/library/datetime.html#datetime.datetime.timestamp
+        if dt.tzinfo: dt -= dt.utcoffset()
+        dt = dt.replace(tzinfo=timezone.utc)
+
+        # Unix epoch is the origin, older dates are negative
+        try: return dt.timestamp()
+        except OverflowError:
+            return -(self.UNIX_EPOCH - dt).total_seconds()

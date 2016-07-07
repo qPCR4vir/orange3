@@ -1,3 +1,4 @@
+import numpy as np
 import sklearn.decomposition as skl_decomposition
 
 try:
@@ -10,14 +11,26 @@ except ImportError:
         pass
 
 import Orange.data
+from Orange.data import Variable
 from Orange.misc.wrapper_meta import WrapperMeta
 from Orange.preprocess import Continuize
 from Orange.projection import SklProjector, Projection
+from Orange.preprocess.score import LearnerScorer
 
 __all__ = ["PCA", "SparsePCA", "RandomizedPCA", "IncrementalPCA"]
 
 
-class PCA(SklProjector):
+class _FeatureScorerMixin(LearnerScorer):
+    feature_type = Variable
+    component = 0
+
+    def score(self, data):
+        model = self(data)
+        return np.abs(model.components_[:self.component]) \
+            if self.component else np.abs(model.components_)
+
+
+class PCA(SklProjector, _FeatureScorerMixin):
     __wraps__ = skl_decomposition.PCA
     name = 'pca'
 
@@ -133,13 +146,7 @@ class Projector:
     def __call__(self, data):
         if data.domain != self.projection.pre_domain:
             data = data.from_table(self.projection.pre_domain, data)
-        self.transformed = self.projection.transform(data.X)
-        return self.transformed[:, self.feature]
-
-    def __getstate__(self):
-        d = dict(self.__dict__)
-        d['transformed'] = None
-        return d
+        return self.projection.transform(data.X)[:, self.feature]
 
 
 class RemotePCA:
@@ -147,7 +154,8 @@ class RemotePCA:
         cont = Continuize(multinomial_treatment=Continuize.Remove)
         data = cont(data)
         model = Orange.projection.IncrementalPCA()
-        percent = batch / data.approx_len() * 100
+        n = data.approx_len()
+        percent = batch / n * 100 if n else 100
         for i in range(max_iter):
             data_sample = data.sample_percentage(percent, no_cache=True)
             if not data_sample:

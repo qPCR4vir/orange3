@@ -6,6 +6,7 @@ A widget for manual editing of a domain's attributes.
 
 """
 import unicodedata
+from itertools import chain
 
 from PyQt4 import QtGui
 from PyQt4.QtGui import (
@@ -133,7 +134,7 @@ class VariableEditor(QWidget):
 
     def _setup_gui_name(self):
         self.name_edit = QLineEdit()
-        self.main_form.addRow("Name", self.name_edit)
+        self.main_form.addRow("Name:", self.name_edit)
         self.name_edit.editingFinished.connect(self.on_name_changed)
 
     def _setup_gui_labels(self):
@@ -189,7 +190,7 @@ class VariableEditor(QWidget):
         hlayout.addStretch(10)
         vlayout.addLayout(hlayout)
 
-        self.main_form.addRow("Labels", vlayout)
+        self.main_form.addRow("Labels:", vlayout)
 
     def set_data(self, var):
         """Set the variable to edit.
@@ -300,7 +301,7 @@ class DiscreteVariableEditor(VariableEditor):
         self.values_edit.setModel(self.values_model)
 
         self.values_model.dataChanged.connect(self.on_values_changed)
-        self.main_form.addRow("Values", self.values_edit)
+        self.main_form.addRow("Values:", self.values_edit)
 
     def set_data(self, var):
         """Set the variable to edit
@@ -369,7 +370,7 @@ class OWEditDomain(widget.OWWidget):
         self.input_vars = ()
         self._invalidated = False
 
-        box = gui.widgetBox(self.controlArea, "Domain Features")
+        box = gui.vBox(self.controlArea, "Domain Features")
 
         self.domain_model = itemmodels.VariableListModel()
         self.domain_view = QListView(
@@ -380,14 +381,13 @@ class OWEditDomain(widget.OWWidget):
             self._on_selection_changed)
         box.layout().addWidget(self.domain_view)
 
-        box = gui.widgetBox(self.controlArea, "Reset")
-        gui.button(box, self, "Reset selected", callback=self.reset_selected)
-        gui.button(box, self, "Reset all", callback=self.reset_all)
+        box = gui.hBox(self.controlArea)
+        gui.button(box, self, "Reset Selected", callback=self.reset_selected)
+        gui.button(box, self, "Reset All", callback=self.reset_all)
 
-        gui.auto_commit(self.controlArea, self, "autocommit", "Commit",
-                        "Commit on change is on")
+        gui.auto_commit(self.controlArea, self, "autocommit", "Apply")
 
-        box = gui.widgetBox(self.mainArea, "Edit")
+        box = gui.vBox(self.mainArea, "Edit")
         self.editor_stack = QtGui.QStackedWidget()
 
         self.editor_stack.addWidget(DiscreteVariableEditor())
@@ -537,6 +537,89 @@ class OWEditDomain(widget.OWWidget):
             new_data = self.data.from_table(new_domain, self.data)
 
         self.send("Data", new_data)
+
+    def sizeHint(self):
+        sh = super().sizeHint()
+        return sh.expandedTo(QSize(660, 550))
+
+    def send_report(self):
+        self.report_raw("", EditDomainReport(
+            old_domain=chain(self.data.domain.variables, self.data.domain.metas),
+            new_domain=self.domain_model).to_html())
+
+
+class EditDomainReport:
+    """Report creator for changes made in the OWEditDomain widget.
+
+    Parameters
+    ----------
+    old_domain : list of Variable
+        input variables
+    new_domain : list of Variable
+        variables with applied changes
+    """
+
+    VARIABLE_HTML = "<li style='font-weight: bold; padding-top:{};'>{}</li>".format
+    INDENTED_ITEM = "<div style='padding-left: 1em'>{}</div>".format
+
+    def __init__(self, old_domain, new_domain):
+        self.old_domain = old_domain
+        self.new_domain = new_domain
+
+    def to_html(self):
+        """Collect changes to variable names, values and labels
+        and render them to html.
+        """
+        all_changes = []
+        for old_var, new_var in zip(self.old_domain, self.new_domain):
+            changes = list(chain.from_iterable([
+                self._section("Values", self._value_changes(old_var, new_var)),
+                self._section("Labels", self._label_changes(old_var, new_var))
+            ]))
+
+            padding_top = ".5em" if all_changes else "0"
+            if old_var.name != new_var.name:
+                all_changes.append(self.VARIABLE_HTML(
+                    padding_top, "{} → {}".format(old_var.name, new_var.name)))
+            elif changes:
+                all_changes.append(self.VARIABLE_HTML(padding_top, old_var.name))
+            all_changes.extend(changes)
+        return "<ul>{}</ul>".format("".join(all_changes)) if all_changes else "No changes"
+
+    def _section(self, name, changes):
+        """Generator that adds section name if there were any changes made."""
+        changes = list(changes)
+        if changes:
+            yield "<div>{}:</div>".format(name)
+            yield from changes
+
+    def _value_changes(self, old_variable, new_variable):
+        """Generator of all renamed values"""
+        if not old_variable.is_discrete:
+            return
+        for old_value, new_value in zip(old_variable.values, new_variable.values):
+            if old_value != new_value:
+                yield self.INDENTED_ITEM("{} → {}".format(old_value, new_value))
+
+    def _label_changes(self, old_variable, new_variable):
+        """Generator of all added, removed and modified labels"""
+        old_labels = old_variable.attributes
+        new_labels = new_variable.attributes
+
+        for name, value in new_labels.items():
+            if name not in old_labels:
+                yield self.INDENTED_ITEM("<i>{}</i>: {}&nbsp;&nbsp;&nbsp;<i>(new)</i>"
+                                         .format(name, value))
+
+        for name, value in old_labels.items():
+            if name not in new_labels:
+                yield self.INDENTED_ITEM("<strike><i>{}</i>: {}</strike>"
+                                         .format(name, value))
+
+        for name in old_labels:
+            if name in new_labels and new_labels[name] != old_labels[name]:
+                yield self.INDENTED_ITEM("<i>{}</i>: {} → {}"
+                                         .format(name, old_labels[name], new_labels[name]))
 
 
 def main():

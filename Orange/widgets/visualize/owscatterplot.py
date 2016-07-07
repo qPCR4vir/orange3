@@ -1,24 +1,21 @@
-from bisect import bisect_left
-import sys
-
 import numpy as np
-from PyQt4.QtCore import QSize, Qt, QTimer
+from PyQt4.QtCore import Qt, QTimer
 from PyQt4 import QtGui
-from PyQt4.QtGui import QApplication, QTableView, QStandardItemModel, \
-    QStandardItem
+from PyQt4.QtGui import QApplication
 from sklearn.neighbors import NearestNeighbors
+from sklearn.metrics import r2_score
 
 import Orange
-from Orange.data import Table, Domain, StringVariable, ContinuousVariable
+from Orange.data import Table, Domain, StringVariable, ContinuousVariable, \
+    DiscreteVariable
+from Orange.canvas import report
 from Orange.data.sql.table import SqlTable, AUTO_DL_LIMIT
-from Orange.preprocess.score import ReliefF
+from Orange.preprocess.score import ReliefF, RReliefF
 from Orange.widgets import gui
-from Orange.widgets.io import FileFormat
 from Orange.widgets.settings import \
     DomainContextHandler, Setting, ContextSetting, SettingProvider
-from Orange.widgets.utils.colorpalette import ColorPaletteDlg
-from Orange.widgets.utils.toolbar import ZoomSelectToolbar
 from Orange.widgets.visualize.owscatterplotgraph import OWScatterPlotGraph
+from Orange.widgets.visualize.utils import VizRankDialogAttrPair
 from Orange.widgets.widget import OWWidget, Default, AttributeList
 
 
@@ -36,9 +33,60 @@ def font_resize(font, factor, minsize=None, maxsize=None):
     return font
 
 
+class ScatterPlotVizRank(VizRankDialogAttrPair):
+    captionTitle = "Score plots"
+    K = 10
+
+    def check_preconditions(self):
+        if not super().check_preconditions():
+            return False
+        if not self.master.data.domain.class_var:
+            self.information(33, "Data with a class variable is required.")
+            return False
+        self.master.information(33)
+        return True
+
+    def iterate_states(self, initial_state):
+        # If we put initialization of `self.attrs` to `initialize`,
+        # `score_heuristic` would be run on every call to `set_data`.
+        if initial_state is None:  # on the first call, compute order
+            self.attrs = self.score_heuristic()
+        yield from super().iterate_states(initial_state)
+
+    def compute_score(self, state):
+        graph = self.master.graph
+        ind12 = [graph.data_domain.index(self.attrs[x]) for x in state]
+        valid = graph.get_valid_list(ind12)
+        X = graph.scaled_data[ind12, :][:, valid].T
+        Y = self.master.data.Y[valid]
+        if X.shape[0] < self.K:
+            return
+        n_neighbors = min(self.K, len(X) - 1)
+        knn = NearestNeighbors(n_neighbors=n_neighbors).fit(X)
+        ind = knn.kneighbors(return_distance=False)
+        if self.master.data.domain.has_discrete_class:
+            return -np.sum(Y[ind] == Y.reshape(-1, 1))
+        else:
+            return -r2_score(Y, np.mean(Y[ind], axis=1)) * \
+                   (len(Y) / len(self.master.data))
+
+    def score_heuristic(self):
+        X = self.master.graph.scaled_data.T
+        Y = self.master.data.Y
+        mdomain = self.master.data.domain
+        dom = Domain([ContinuousVariable(str(i)) for i in range(X.shape[1])],
+                     mdomain.class_vars)
+        data = Table(dom, X, Y)
+        relief = ReliefF if isinstance(dom.class_var, DiscreteVariable) \
+            else RReliefF
+        weights = relief(n_iterations=100, k_nearest=self.K)(data)
+        attrs = sorted(zip(weights, mdomain.attributes), reverse=True)
+        return [a for _, a in attrs]
+
+
 class OWScatterPlot(OWWidget):
     name = 'Scatter Plot'
-    description = 'Scatter plot visualization.'
+    description = 'Scatterplot visualization with explorative analysis and intelligent data visualization enhancements.'
     icon = "icons/ScatterPlot.svg"
 
     inputs = [("Data", Table, "set_data", Default),
@@ -54,23 +102,20 @@ class OWScatterPlot(OWWidget):
     auto_send_selection = Setting(True)
     auto_sample = Setting(True)
     toolbar_selection = Setting(0)
-    color_settings = Setting(None)
-    selected_schema_index = Setting(0)
 
     attr_x = ContextSetting("")
     attr_y = ContextSetting("")
 
     graph = SettingProvider(OWScatterPlotGraph)
-    zoom_select_toolbar = SettingProvider(ZoomSelectToolbar)
 
     jitter_sizes = [0, 0.1, 0.5, 1, 2, 3, 4, 5, 7, 10]
 
-    want_graph = True
+    graph_name = "graph.plot_widget.plotItem"
 
     def __init__(self):
         super().__init__()
 
-        box = gui.widgetBox(self.mainArea, True, margin=0)
+        box = gui.vBox(self.mainArea, True, margin=0)
         self.graph = OWScatterPlotGraph(self, box, "ScatterPlot")
         box.layout().addWidget(self.graph.plot_widget)
         plot = self.graph.plot_widget
@@ -90,9 +135,10 @@ class OWScatterPlot(OWWidget):
         self.__timer = QTimer(self, interval=1200)
         self.__timer.timeout.connect(self.add_data)
 
-        common_options = {"labelWidth": 50, "orientation": "horizontal",
-                          "sendSelectedValue": True, "valueType": str}
-        box = gui.widgetBox(self.controlArea, "Axis Data")
+        common_options = dict(
+            labelWidth=50, orientation=Qt.Horizontal, sendSelectedValue=True,
+            valueType=str)
+        box = gui.vBox(self.controlArea, "Axis Data")
         self.cb_attr_x = gui.comboBox(box, self, "attr_x", label="Axis x:",
                                       callback=self.update_attr,
                                       **common_options)
@@ -100,13 +146,14 @@ class OWScatterPlot(OWWidget):
                                       callback=self.update_attr,
                                       **common_options)
 
-        self.vizrank = self.VizRank(self)
-        vizrank_box = gui.widgetBox(box, None, orientation='horizontal')
+        self.vizrank = ScatterPlotVizRank(self)
+        vizrank_box = gui.hBox(box)
         gui.separator(vizrank_box, width=common_options["labelWidth"])
         self.vizrank_button = gui.button(
-            vizrank_box, self, "Rank projections", callback=self.vizrank.reshow,
-            tooltip="Find projections with good class separation")
-        self.vizrank_button.setEnabled(False)
+            vizrank_box, self, "Score Plots", callback=self.vizrank.reshow,
+            tooltip="Find informative projections", enabled=False)
+        self.vizrank.pairSelected.connect(self.set_attr)
+
         gui.separator(box)
 
         gui.valueSlider(
@@ -123,7 +170,7 @@ class OWScatterPlot(OWWidget):
             callback=self.switch_sampling, commit=lambda: self.add_data(1))
         self.sampling.setVisible(False)
 
-        box = gui.widgetBox(self.controlArea, "Points")
+        box = gui.vBox(self.controlArea, "Points")
         self.cb_attr_color = gui.comboBox(
             box, self, "graph.attr_color", label="Color:",
             emptyString="(Same color)", callback=self.update_colors,
@@ -143,18 +190,21 @@ class OWScatterPlot(OWWidget):
 
         g = self.graph.gui
         box2 = g.point_properties_box(self.controlArea, box)
-        gui.button(box2, self, "Set Colors", self.set_colors)
 
-        box = gui.widgetBox(self.controlArea, "Plot Properties")
+        box = gui.vBox(self.controlArea, "Plot Properties")
         g.add_widgets([g.ShowLegend, g.ShowGridLines], box)
-        gui.checkBox(box, self, value='graph.tooltip_shows_all',
-                     label='Show all data on mouse hover')
+        gui.checkBox(
+            box, self, value='graph.tooltip_shows_all',
+            label='Show all data on mouse hover')
         self.cb_class_density = gui.checkBox(
             box, self, value='graph.class_density', label='Show class density',
             callback=self.update_density)
+        gui.checkBox(
+            box, self, 'graph.label_only_selected',
+            'Label only selected points', callback=self.graph.update_labels)
 
         self.zoom_select_toolbar = g.zoom_select_toolbar(
-            gui.widgetBox(self.controlArea, "Zoom/Select"), nomargin=True,
+            gui.vBox(self.controlArea, "Zoom/Select"), nomargin=True,
             buttons=[g.StateButtonsBegin, g.SimpleSelect, g.Pan, g.Zoom,
                      g.StateButtonsEnd, g.ZoomReset]
         )
@@ -166,16 +216,11 @@ class OWScatterPlot(OWWidget):
         self.controlArea.layout().addStretch(100)
         self.icons = gui.attributeIconDict
 
-        dlg = self.create_color_dialog()
-        self.graph.continuous_palette = dlg.getContinuousPalette("contPalette")
-        self.graph.discrete_palette = dlg.getDiscretePalette("discPalette")
-        dlg.deleteLater()
-
         p = self.graph.plot_widget.palette()
         self.graph.set_palette(p)
 
         gui.auto_commit(self.controlArea, self, "auto_send_selection",
-                        "Send Selection")
+                        "Send Selection", "Send Automatically")
 
         def zoom(s):
             """Zoom in/out by factor `s`."""
@@ -202,7 +247,6 @@ class OWScatterPlot(OWWidget):
             triggered=fit_to_view
         )
         self.addActions([zoom_in, zoom_out, zoom_fit])
-        self.graphButton.clicked.connect(self.save_graph)
 
     # def settingsFromWidgetCallback(self, handler, context):
     #     context.selectionPolygons = []
@@ -254,10 +298,10 @@ class OWScatterPlot(OWWidget):
 
         if not same_domain:
             self.init_attr_values()
-        self.vizrank._initialize()
+        self.vizrank.initialize()
         self.vizrank_button.setEnabled(
             self.data is not None and self.data.domain.class_var is not None
-            and len(self.data.domain.attributes) > 1)
+            and len(self.data.domain.attributes) > 1 and len(self.data) > 1)
         self.openContext(self.data)
 
     def add_data(self, time=0.4):
@@ -300,7 +344,7 @@ class OWScatterPlot(OWWidget):
     def handleNewSignals(self):
         self.graph.new_data(self.data_metas_X, self.subset_data)
         if self.attribute_selection_list and \
-                all(attr.name in self.graph.attribute_name_index
+                all(attr in self.graph.data_domain
                     for attr in self.attribute_selection_list):
             self.attr_x = self.attribute_selection_list[0].name
             self.attr_y = self.attribute_selection_list[1].name
@@ -371,8 +415,12 @@ class OWScatterPlot(OWWidget):
         self.graph.attr_size = ""
         self.graph.attr_label = ""
 
-    def update_attr(self, attributes=None):
-        self.update_graph(attributes=attributes)
+    def set_attr(self, attr_x, attr_y):
+        self.attr_x, self.attr_y = attr_x.name, attr_y.name
+        self.update_attr()
+
+    def update_attr(self):
+        self.update_graph()
         self.cb_class_density.setEnabled(self.graph.can_draw_density())
         self.send_features()
 
@@ -383,10 +431,8 @@ class OWScatterPlot(OWWidget):
     def update_density(self):
         self.update_graph(reset_view=False)
 
-    def update_graph(self, attributes=None, reset_view=True, **_):
+    def update_graph(self, reset_view=True, **_):
         self.graph.zoomStack = []
-        if attributes and len(attributes) == 2:
-            self.attr_x, self.attr_y = attributes
         if not self.graph.have_data:
             return
         self.graph.update_data(self.attr_x, self.attr_y, reset_view)
@@ -420,22 +466,6 @@ class OWScatterPlot(OWWidget):
         self.send_data()
         self.send_features()
 
-    def set_colors(self):
-        dlg = self.create_color_dialog()
-        if dlg.exec_():
-            self.color_settings = dlg.getColorSchemas()
-            self.selected_schema_index = dlg.selectedSchemaIndex
-            self.graph.continuous_palette = dlg.getContinuousPalette("contPalette")
-            self.graph.discrete_palette = dlg.getDiscretePalette("discPalette")
-            self.update_graph()
-
-    def create_color_dialog(self):
-        c = ColorPaletteDlg(self, "Color Palette")
-        c.createDiscretePalette("discPalette", "Discrete Palette")
-        c.createContinuousPalette("contPalette", "Continuous Palette")
-        c.setColorSchemas(self.color_settings, self.selected_schema_index)
-        return c
-
     def closeEvent(self, ce):
         self.vizrank.close()
         super().closeEvent(ce)
@@ -444,33 +474,27 @@ class OWScatterPlot(OWWidget):
         self.vizrank.hide()
         super().hideEvent(he)
 
-    def sendReport(self):
-        self.startReport(
-            "%s [%s - %s]" % (self.windowTitle(), self.attr_x, self.attr_y))
-        self.reportSettings(
-            "Visualized attributes",
-            [("X", self.attr_x),
-             ("Y", self.attr_y),
-             self.graph.attr_color and ("Color", self.graph.attr_color),
-             self.graph.attr_label and ("Label", self.graph.attr_label),
-             self.graph.attr_shape and ("Shape", self.graph.attr_shape),
-             self.graph.attr_size and ("Size", self.graph.attr_size)])
-        self.reportSettings(
-            "Settings",
-            [("Symbol size", self.graph.point_width),
-             ("Opacity", self.graph.alpha_value),
-             ("Jittering", self.graph.jitter_size),
-             ("Jitter continuous attributes",
-              gui.YesNo[self.graph.jitter_continuous])])
-        self.reportSection("Graph")
-        self.reportImage(self.graph.save_to_file, QSize(400, 400))
+    def get_widget_name_extension(self):
+        if self.data is not None:
+            return "{} vs {}".format(self.combo_value(self.cb_attr_x),
+                                     self.combo_value(self.cb_attr_y))
 
-    def save_graph(self):
-        from Orange.widgets.data.owsave import OWSave
-
-        save_img = OWSave(data=self.graph.plot_widget.plotItem,
-                          file_formats=FileFormat.img_writers)
-        save_img.exec_()
+    def send_report(self):
+        disc_attr = False
+        if self.data:
+            domain = self.data.domain
+            disc_attr = domain[self.attr_x].is_discrete or \
+                        domain[self.attr_y].is_discrete
+        caption = report.render_items_vert((
+             ("Color", self.combo_value(self.cb_attr_color)),
+             ("Label", self.combo_value(self.cb_attr_label)),
+             ("Shape", self.combo_value(self.cb_attr_shape)),
+             ("Size", self.combo_value(self.cb_attr_size)),
+             ("Jittering", (self.graph.jitter_continuous or disc_attr) and
+              self.graph.jitter_size)))
+        self.report_plot()
+        if caption:
+            self.report_caption(caption)
 
     def onDeleteWidget(self):
         super().onDeleteWidget()
@@ -478,138 +502,8 @@ class OWScatterPlot(OWWidget):
         self.graph.plot_widget.clear()
 
 
-    class VizRank(OWWidget):
-        name = "Rank projections (Scatter Plot)"
-
-        want_control_area = False
-
-        def __init__(self, parent_widget):
-            super().__init__()
-            self.parent_widget = parent_widget
-            self.running = False
-            self.progress = None
-            self.k = 10
-
-            self.projectionTable = QTableView()
-            self.mainArea.layout().addWidget(self.projectionTable)
-            self.projectionTable.setSelectionBehavior(QTableView.SelectRows)
-            self.projectionTable.setSelectionMode(QTableView.SingleSelection)
-            self.projectionTable.setSortingEnabled(True)
-            self.projectionTableModel = QStandardItemModel(self)
-            self.projectionTable.setModel(self.projectionTableModel)
-            self.projectionTable.selectionModel().selectionChanged.connect(
-                self.on_selection_changed)
-
-            self.button = gui.button(self.mainArea, self, "Start evaluation",
-                                     callback=self.toggle, default=True)
-            self.resize(380, 512)
-            self._initialize()
-
-        def _initialize(self):
-            self.running = False
-            self.projectionTableModel.clear()
-            self.projectionTableModel.setHorizontalHeaderLabels(
-                ["Score", "Feature 1", "Feature 2"])
-            self.projectionTable.setColumnWidth(0, 60)
-            self.projectionTable.setColumnWidth(1, 120)
-            self.projectionTable.setColumnWidth(2, 120)
-            self.button.setText("Start evaluation")
-            self.button.setEnabled(False)
-            self.pause = False
-            self.data = None
-            self.attrs = []
-            self.scores = []
-            self.i, self.j = 0, 0
-            if self.progress:
-                self.progress.finish()
-            self.progress = None
-
-
-            self.information(0)
-            if self.parent_widget.data:
-                if not self.parent_widget.data.domain.class_var:
-                    self.information(
-                        0, "Data with a class variable is required.")
-                    return
-                if len(self.parent_widget.data.domain.attributes) < 2:
-                    self.information(
-                        0, 'At least 2 unique features are needed.')
-                    return
-                self.button.setEnabled(True)
-
-        def on_selection_changed(self, selected, deselected):
-            """Called when the ranks view selection changes."""
-            a1 = selected.indexes()[1].data()
-            a2 = selected.indexes()[2].data()
-            self.parent_widget.update_attr(attributes=(a1, a2))
-
-        def toggle(self):
-            self.running ^= 1
-            if self.running:
-                self.button.setText("Pause")
-                self.run()
-            else:
-                self.button.setText("Continue")
-                self.button.setEnabled(False)
-
-        def run(self):
-            graph = self.parent_widget.graph
-            y_full = self.parent_widget.data.Y
-            norm = 1 / (len(y_full) * self.k)
-            if not self.attrs:
-                self.attrs = self.score_heuristic()
-            if not self.progress:
-                self.progress = gui.ProgressBar(
-                    self, len(self.attrs) * (len(self.attrs) - 1) / 2)
-            for i in range(self.i, len(self.attrs)):
-                ind1 = graph.attribute_name_index[self.attrs[i]]
-                for j in range(self.j, i):
-                    if not self.running:
-                        self.i, self.j = i, j
-                        if not self.projectionTable.selectedIndexes():
-                            self.projectionTable.selectRow(0)
-                        self.button.setEnabled(True)
-                        return
-                    ind2 = graph.attribute_name_index[self.attrs[j]]
-                    X = graph.scaled_data[[ind1, ind2], :]
-                    valid = graph.get_valid_list([ind1, ind2])
-                    X = X[:, valid].T
-                    y = y_full[valid]
-                    knn = NearestNeighbors(n_neighbors=self.k).fit(X)
-                    ind = knn.kneighbors(return_distance=False)
-                    score = norm * np.sum(y[ind] == y.reshape(-1, 1))
-                    pos = bisect_left(self.scores, score)
-                    self.projectionTableModel.insertRow(
-                        len(self.scores) - pos,
-                        [QStandardItem("{:.4f}".format(score)),
-                         QStandardItem(self.attrs[j]),
-                         QStandardItem(self.attrs[i])])
-                    self.scores.insert(pos, score)
-                    self.progress.advance()
-                self.j = 0
-            self.progress.finish()
-            if not self.projectionTable.selectedIndexes():
-                self.projectionTable.selectRow(0)
-            self.button.setText("Finished")
-            self.button.setEnabled(False)
-
-        def score_heuristic(self):
-            X = self.parent_widget.graph.scaled_data.T
-            Y = self.parent_widget.data.Y
-            dom = Orange.data.Domain([ContinuousVariable(str(i))
-                                      for i in range(X.shape[1])],
-                                     self.parent_widget.data.domain.class_vars)
-            data = Orange.data.Table(dom, X, Y)
-            weights = ReliefF(n_iterations=100, k_nearest=self.k)(data)
-            attrs = sorted(
-                zip(weights,
-                    (x.name for x in self.parent_widget.data.domain.attributes)
-                    ),
-                reverse=True)
-            return [a for _, a in attrs]
-
-
 def test_main(argv=None):
+    import sys
     if argv is None:
         argv = sys.argv
     argv = list(argv)

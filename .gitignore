@@ -1,8 +1,7 @@
 # Build files
 build
 dist
-Orange.egg-info/*
-Orange.egg-info
+Orange3.egg-info
 Orange/version.py
 doc/build
 *.so
@@ -24,3 +23,7 @@ __pycache__
 
 # Windows temp files
 Thumbs.db
+
+# PyLint, Coverage reports
+.pylint_cache/*
+htmlcov/*

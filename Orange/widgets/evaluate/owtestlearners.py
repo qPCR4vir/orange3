@@ -20,7 +20,7 @@ import Orange.classification
 import Orange.regression
 
 from Orange.base import Learner
-from Orange.evaluation import scoring
+from Orange.evaluation import scoring, Results
 from Orange.preprocess.preprocess import Preprocess
 from Orange.preprocess import RemoveNaNClasses
 from Orange.widgets import widget, gui, settings
@@ -64,9 +64,10 @@ class ItemDelegate(QStyledItemDelegate):
 
 
 class Try(abc.ABC):
-    # Try to walk in a Turing tar pit.
+    """Try to walk in a Turing tar pit."""
 
     class Success:
+        """Data type for instance constructed on success"""
         __slots__ = ("__value",)
 #         __bool__ = lambda self: True
         success = property(lambda self: True)
@@ -86,6 +87,7 @@ class Try(abc.ABC):
             return Try(lambda: fn(self.value))
 
     class Fail:
+        """Data type for instance constructed on fail"""
         __slots__ = ("__exception", )
 #         __bool__ = lambda self: False
         success = property(lambda self: False)
@@ -129,28 +131,37 @@ class OWTestLearners(widget.OWWidget):
     icon = "icons/TestLearners1.svg"
     priority = 100
 
-    inputs = [("Learner", Learner,
-               "set_learner", widget.Multiple),
+    inputs = [("Learner", Learner, "set_learner", widget.Multiple),
               ("Data", Table, "set_train_data", widget.Default),
               ("Test Data", Table, "set_test_data"),
               ("Preprocessor", Preprocess, "set_preprocessor")]
 
-    outputs = [("Predictions", Orange.data.Table),
-               ("Evaluation Results", Orange.evaluation.Results)]
+    outputs = [("Predictions", Table),
+               ("Evaluation Results", Results)]
 
     settingsHandler = settings.ClassValuesContextHandler()
 
     #: Resampling/testing types
-    KFold, LeaveOneOut, ShuffleSplit, TestOnTrain, TestOnTest = 0, 1, 2, 3, 4
+    KFold, ShuffleSplit, LeaveOneOut, TestOnTrain, TestOnTest = 0, 1, 2, 3, 4
+    #: Numbers of folds
+    NFolds = [2, 3, 5, 10, 20]
+    #: Number of repetitions
+    NRepeats = [2, 3, 5, 10, 20, 50, 100]
+    #: Sample sizes
+    SampleSizes = [5, 10, 20, 25, 30, 33, 40, 50, 60, 66, 70, 75, 80, 90, 95]
 
     #: Selected resampling type
     resampling = settings.Setting(0)
     #: Number of folds for K-fold cross validation
-    k_folds = settings.Setting(10)
+    n_folds = settings.Setting(3)
+    #: Stratified sampling for K-fold
+    cv_stratified = settings.Setting(True)
     #: Number of repeats for ShuffleSplit sampling
-    n_repeat = settings.Setting(10)
-    #: ShuffleSplit sampling p
-    sample_p = settings.Setting(75)
+    n_repeats = settings.Setting(3)
+    #: ShuffleSplit sample size
+    sample_size = settings.Setting(9)
+    #: Stratified sampling for Random Sampling
+    shuffle_stratified = settings.Setting(True)
 
     TARGET_AVERAGE = "(Average over classes)"
     class_selection = settings.ContextSetting(TARGET_AVERAGE)
@@ -164,36 +175,44 @@ class OWTestLearners(widget.OWWidget):
         self.train_data_missing_vals = False
         self.test_data_missing_vals = False
 
-        #: An Ordered dictionary with current inputs and their testing
-        #: results.
+        #: An Ordered dictionary with current inputs and their testing results.
         self.learners = OrderedDict()
 
-        sbox = gui.widgetBox(self.controlArea, "Sampling")
+        sbox = gui.vBox(self.controlArea, "Sampling")
         rbox = gui.radioButtons(
-            sbox, self, "resampling", callback=self._param_changed
-        )
+            sbox, self, "resampling", callback=self._param_changed)
+
         gui.appendRadioButton(rbox, "Cross validation")
         ibox = gui.indentedBox(rbox)
-        gui.spin(ibox, self, "k_folds", 2, 50, label="Number of folds:",
-                 callback=self.kfold_changed)
-        gui.appendRadioButton(rbox, "Leave one out")
+        gui.comboBox(
+            ibox, self, "n_folds", label="Number of folds: ",
+            items=[str(x) for x in self.NFolds], maximumContentsLength=3,
+            orientation=Qt.Horizontal, callback=self.kfold_changed)
+        gui.checkBox(
+            ibox, self, "cv_stratified", "Stratified",
+            callback=self.kfold_changed)
+
         gui.appendRadioButton(rbox, "Random sampling")
         ibox = gui.indentedBox(rbox)
-        gui.spin(ibox, self, "n_repeat", 2, 50, label="Repeat train/test",
-                 callback=self.shuffle_split_changed)
-        gui.widgetLabel(ibox, "Relative training set size:")
-        gui.hSlider(ibox, self, "sample_p", minValue=1, maxValue=99,
-                    ticks=20, vertical=False, labelFormat="%d %%",
-                    callback=self.shuffle_split_changed)
+        gui.comboBox(
+            ibox, self, "n_repeats", label="Repeat train/test: ",
+            items=[str(x) for x in self.NRepeats], maximumContentsLength=3,
+            orientation=Qt.Horizontal, callback=self.shuffle_split_changed)
+        gui.comboBox(
+            ibox, self, "sample_size", label="Training set size: ",
+            items=["{} %".format(x) for x in self.SampleSizes],
+            maximumContentsLength=5, orientation=Qt.Horizontal,
+            callback=self.shuffle_split_changed)
+        gui.checkBox(
+            ibox, self, "shuffle_stratified", "Stratified",
+            callback=self.shuffle_split_changed)
+
+        gui.appendRadioButton(rbox, "Leave one out")
 
         gui.appendRadioButton(rbox, "Test on train data")
         gui.appendRadioButton(rbox, "Test on test data")
 
-        rbox.layout().addSpacing(5)
-        self.apply_button = gui.button(
-            rbox, self, "Apply", callback=self.apply, default=True)
-
-        self.cbox = gui.widgetBox(self.controlArea, "Target class")
+        self.cbox = gui.vBox(self.controlArea, "Target Class")
         self.class_selection_combo = gui.comboBox(
             self.cbox, self, "class_selection", items=[],
             sendSelectedValue=True, valueType=str,
@@ -218,7 +237,7 @@ class OWTestLearners(widget.OWWidget):
         self.view.setModel(self.result_model)
         self.view.setItemDelegate(ItemDelegate())
 
-        box = gui.widgetBox(self.mainArea, "Evaluation Results")
+        box = gui.vBox(self.mainArea, "Evaluation Results")
         box.layout().addWidget(self.view)
 
     def sizeHint(self):
@@ -267,6 +286,7 @@ class OWTestLearners(widget.OWWidget):
         self.data = data
         self.closeContext()
         if data is not None:
+            self._update_class_selection()
             self.openContext(data.domain.class_var)
         self._invalidate()
 
@@ -292,6 +312,7 @@ class OWTestLearners(widget.OWWidget):
         self.warning(4)
         self.test_data_missing_vals = data is not None and \
                                       np.isnan(data.Y).any()
+
         if self.train_data_missing_vals or self.test_data_missing_vals:
             self.warning(4, self._get_missing_data_warning(
                 self.train_data_missing_vals, self.test_data_missing_vals
@@ -318,7 +339,7 @@ class OWTestLearners(widget.OWWidget):
     def handleNewSignals(self):
         """Reimplemented from OWWidget.handleNewSignals."""
         self._update_class_selection()
-        self.apply()
+        self.commit()
 
     def kfold_changed(self):
         self.resampling = OWTestLearners.KFold
@@ -336,8 +357,7 @@ class OWTestLearners(widget.OWWidget):
         Run/evaluate the learners.
         """
         self.warning([1, 2])
-        self.error(2)
-
+        self.error([2, 4])
         if self.data is None:
             return
 
@@ -356,6 +376,8 @@ class OWTestLearners(widget.OWWidget):
         items = [(key, slot) for key, slot in self.learners.items()
                  if slot.results is None]
         learners = [slot.learner for _, slot in items]
+        if len(items) == 0:
+            return
 
         if self.test_data is not None and \
                 self.resampling != OWTestLearners.TestOnTest:
@@ -370,31 +392,46 @@ class OWTestLearners(widget.OWWidget):
             preprocessor=self.preprocessor,
             callback=update_progress)
         self.setStatusMessage("Running")
-        self.progressBarInit()
-        if self.resampling == OWTestLearners.KFold:
-            results = Orange.evaluation.CrossValidation(
-                self.data, learners, k=self.k_folds, random_state=rstate,
-                **common_args)
-        elif self.resampling == OWTestLearners.LeaveOneOut:
-            results = Orange.evaluation.LeaveOneOut(
-                self.data, learners, **common_args)
-        elif self.resampling == OWTestLearners.ShuffleSplit:
-            train_size = self.sample_p / 100
-            results = Orange.evaluation.ShuffleSplit(
-                self.data, learners, n_resamples=self.n_repeat,
-                train_size=train_size, test_size=None,
-                random_state=rstate, **common_args)
-        elif self.resampling == OWTestLearners.TestOnTrain:
-            results = Orange.evaluation.TestOnTrainingData(
-                self.data, learners, **common_args)
-        elif self.resampling == OWTestLearners.TestOnTest:
-            results = Orange.evaluation.TestOnTestData(
-                self.data, self.test_data, learners, **common_args)
-        else:
-            assert False
+
+        with self.progressBar():
+            try:
+                folds = self.NFolds[self.n_folds]
+                if self.resampling == OWTestLearners.KFold:
+                    if len(self.data) < folds:
+                        self.error(4, "Number of folds exceeds the data size")
+                        return
+                    warnings = []
+                    results = Orange.evaluation.CrossValidation(
+                        self.data, learners, k=folds,
+                        random_state=rstate, warnings=warnings, **common_args)
+                    if warnings:
+                        self.warning(2, warnings[0])
+                elif self.resampling == OWTestLearners.LeaveOneOut:
+                    results = Orange.evaluation.LeaveOneOut(
+                        self.data, learners, **common_args)
+                elif self.resampling == OWTestLearners.ShuffleSplit:
+                    train_size = self.SampleSizes[self.sample_size] / 100
+                    results = Orange.evaluation.ShuffleSplit(
+                        self.data, learners,
+                        n_resamples=self.NRepeats[self.n_repeats],
+                        train_size=train_size, test_size=None,
+                        stratified=self.shuffle_stratified,
+                        random_state=rstate, **common_args)
+                elif self.resampling == OWTestLearners.TestOnTrain:
+                    results = Orange.evaluation.TestOnTrainingData(
+                        self.data, learners, **common_args)
+                elif self.resampling == OWTestLearners.TestOnTest:
+                    results = Orange.evaluation.TestOnTestData(
+                        self.data, self.test_data, learners, **common_args)
+                else:
+                    assert False
+            except (RuntimeError, ValueError) as e:
+                self.error(2, str(e))
+                self.setStatusMessage("")
+                return
 
         learner_key = {slot.learner: key for key, slot in self.learners.items()}
-        for learner, result in zip(learners, split_by_model(results)):
+        for learner, result in zip(learners, results.split_by_model()):
             stats = None
             if class_var.is_discrete:
                 scorers = classification_stats.scores
@@ -415,7 +452,6 @@ class OWTestLearners(widget.OWWidget):
                 self.learners[key]._replace(results=result, stats=stats)
 
         self.setStatusMessage("")
-        self.progressBarFinished()
 
     def _update_header(self):
         # Set the correct horizontal header labels on the results_model.
@@ -445,8 +481,8 @@ class OWTestLearners(widget.OWWidget):
         target_index = None
         if self.data is not None:
             class_var = self.data.domain.class_var
-            if class_var.is_discrete and \
-                    self.class_selection != self.TARGET_AVERAGE:
+            if self.data.domain.has_discrete_class and \
+                            self.class_selection != self.TARGET_AVERAGE:
                 target_index = class_var.values.index(self.class_selection)
         else:
             class_var = None
@@ -549,18 +585,15 @@ class OWTestLearners(widget.OWWidget):
                         item.setData(None, Qt.DisplayRole)
                         item.setData(None, Qt.ToolTipRole)
 
-        self.apply_button.setEnabled(True)
+        self.commit()
 
-    def apply(self):
-        self.apply_button.setEnabled(False)
+    def commit(self):
+        """Recompute and output the results"""
         self._update_header()
         # Update the view to display the model names
         self._update_stats_model()
         self._update_results()
         self._update_stats_model()
-        self.commit()
-
-    def commit(self):
         valid = [slot for slot in self.learners.values()
                  if slot.results is not None and slot.results.success]
         if valid:
@@ -577,36 +610,39 @@ class OWTestLearners(widget.OWWidget):
         self.send("Evaluation Results", combined)
         self.send("Predictions", predictions)
 
+    def send_report(self):
+        """Report on the testing schema and results"""
+        if not self.data or not self.learners:
+            return
+        if self.resampling == self.KFold:
+            stratified = 'Stratified ' if self.cv_stratified else ''
+            items = [("Sampling type", "{}{}-fold Cross validation".
+                      format(stratified, self.NFolds[self.n_folds]))]
+        elif self.resampling == self.LeaveOneOut:
+            items = [("Sampling type", "Leave one out")]
+        elif self.resampling == self.ShuffleSplit:
+            stratified = 'Stratified ' if self.shuffle_stratified else ''
+            items = [("Sampling type",
+                      "{}Shuffle split, {} random samples with {}% data "
+                      .format(stratified, self.NRepeats[self.n_repeats],
+                              self.SampleSizes[self.sample_size]))]
+        elif self.resampling == self.TestOnTrain:
+            items = [("Sampling type", "No sampling, test on training data")]
+        elif self.resampling == self.TestOnTest:
+            items = [("Sampling type", "No sampling, test on testing data")]
+        else:
+            items = []
+        if self.data.domain.has_discrete_class:
+            items += [("Target class", self.class_selection.strip("()"))]
+        if items:
+            self.report_items("Settings", items)
+        self.report_table("Scores", self.view)
+
 
 def learner_name(learner):
+    """Return the value of `learner.name` if it exists, or the learner's type
+    name otherwise"""
     return getattr(learner, "name", type(learner).__name__)
-
-
-def split_by_model(results):
-    """
-    Split evaluation results by models
-    """
-    data = results.data
-    nmethods = len(results.predicted)
-    for i in range(nmethods):
-        res = Orange.evaluation.Results()
-        res.data = data
-        res.domain = results.domain
-        res.row_indices = results.row_indices
-        res.actual = results.actual
-        res.predicted = results.predicted[(i,), :]
-
-        if getattr(results, "probabilities", None) is not None:
-            res.probabilities = results.probabilities[(i,), :, :]
-
-        if results.models:
-            res.models = [mf[i] for mf in results.models]
-
-        if results.folds:
-            res.folds = results.folds
-
-        res.failed = [results.failed[i]]
-        yield res
 
 
 def results_add_by_model(x, y):
@@ -652,6 +688,7 @@ def results_one_vs_rest(results, pos_index):
 
 
 def main(argv=None):
+    """Show and test the widget"""
     if argv is None:
         argv = sys.argv
     argv = list(argv)

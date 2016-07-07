@@ -5,8 +5,8 @@ from math import isnan
 
 from ..misc.enum import Enum
 import numpy as np
-import bottlechest as bn
-from Orange.data import Instance, Storage
+import bottleneck as bn
+from Orange.data import Instance, Storage, Variable
 
 
 class Filter:
@@ -50,14 +50,14 @@ class IsDefined(Filter):
 
     def __call__(self, data):
         if isinstance(data, Instance):
-            return self.negate != bn.anynan(data._values)
+            return self.negate == bn.anynan(data._x)
         if isinstance(data, Storage):
             try:
                 return data._filter_is_defined(self.columns, self.negate)
             except NotImplementedError:
                 pass
 
-        r = np.fromiter((bn.anynan(inst._values) for inst in data),
+        r = np.fromiter((not bn.anynan(inst._x) for inst in data),
                         dtype=bool, count=len(data))
         if self.negate:
             r = np.logical_not(r)
@@ -75,14 +75,14 @@ class HasClass(Filter):
 
     def __call__(self, data):
         if isinstance(data, Instance):
-            return self.negate != bn.anynan(data._y)
+            return self.negate == bn.anynan(data._y)
         if isinstance(data, Storage):
             try:
                 return data._filter_has_class(self.negate)
             except NotImplementedError:
                 pass
 
-        r = np.fromiter((bn.anynan(inst._y) for inst in data), bool, len(data))
+        r = np.fromiter((not bn.anynan(inst._y) for inst in data), bool, len(data))
         if self.negate:
             r = np.logical_not(r)
         return data[r]
@@ -159,11 +159,11 @@ class SameValue(Filter):
         if column >= 0:
             if self.negate:
                 retain = np.fromiter(
-                    (inst._values[column] != value for inst in data),
+                    (inst[column] != value for inst in data),
                      bool, len(data))
             else:
                 retain = np.fromiter(
-                    (inst._values[column] == value for inst in data),
+                    (inst[column] == value for inst in data),
                      bool, len(data))
         else:
             column = -1 - column
@@ -181,11 +181,12 @@ class SameValue(Filter):
 class Values(Filter):
     """
     Select the data instances based on conjunction or disjunction of filters
-    derived from :obj:`ValueFilter` that check values of individual features.
+    derived from :obj:`ValueFilter` that check values of individual features
+    or another (nested) Values filter.
 
     .. attribute:: conditions
 
-        A list of conditions, derived from :obj:`ValueFilter`
+        A list of conditions, derived from :obj:`ValueFilter` or :obj:`Values`
 
     .. attribute:: conjunction
 
@@ -333,6 +334,8 @@ class FilterContinuous(ValueFilter):
         if inst.domain is not self.last_domain:
             self.cache_position(inst.domain)
         value = inst[self.pos_cache]
+        if isnan(value):
+            return self.oper == self.Equal and isnan(self.ref)
         if self.oper == self.Equal:
             return value == self.ref
         if self.oper == self.NotEqual:
@@ -350,28 +353,29 @@ class FilterContinuous(ValueFilter):
         if self.oper == self.Outside:
             return not self.ref <= value <= self.max
         if self.oper == self.IsDefined:
-            return not isnan(value)
+            return True
         raise ValueError("invalid operator")
 
     def __str__(self):
-        if self.oper == self.Equal:
-            return "feature_%s == %s" % (self.column, self.ref)
-        if self.oper == self.NotEqual:
-            return "feature_%s != %s" % (self.column, self.ref)
-        if self.oper == self.Less:
-            return "feature_%s < %s" % (self.column, self.ref)
-        if self.oper == self.LessEqual:
-            return "feature_%s <= %s" % (self.column, self.ref)
-        if self.oper == self.Greater:
-            return "feature_%s > %s" % (self.column, self.ref)
-        if self.oper == self.GreaterEqual:
-            return "feature_%s >= %s" % (self.column, self.ref)
+        if isinstance(self.column, str):
+            column = self.column
+        elif isinstance(self.column, Variable):
+            column = self.column.name
+        else:
+            column = "feature({})".format(self.column)
+
+        names = {self.Equal: "=", self.NotEqual: "≠",
+                 self.Less: "<", self.LessEqual: "≤",
+                 self.Greater: ">", self.GreaterEqual: "≥"}
+        if self.oper in names:
+            return "{} {} {}".format(column, names[self.oper], self.ref)
         if self.oper == self.Between:
-            return "feature_%s <= %s <= %s" % (self.column, self.ref, self.max)
+            return "{} ≤ {} ≤ {}".format(self.min, column, self.max)
         if self.oper == self.Outside:
-            return "NOT %s <= feature_%s <= %s" % (self.column, self.ref, self.max)
+            return "not {} ≤ {} ≤ {}".format(self.min, column, self.max)
         if self.oper == self.IsDefined:
-            return "feature_%s IS DEFINED" % self.column
+            return "{} is defined".format(column)
+        return "invalid operator"
 
     __repr__ = __str__
 
@@ -405,7 +409,7 @@ class FilterString(ValueFilter):
 
     .. attribute:: oper
 
-        The operator; should be `FilterContinuous.Equal`, `NotEqual`, `Less`,
+        The operator; should be `FilterString.Equal`, `NotEqual`, `Less`,
         `LessEqual`, `Greater`, `GreaterEqual`, `Between`, `Outside`,
         `Contains`, `StartsWith`, `EndsWith` or `IsDefined`.
 
@@ -441,12 +445,13 @@ class FilterString(ValueFilter):
             self.cache_position(inst.domain)
         value = inst[self.pos_cache]
         if self.oper == self.IsDefined:
-            return bool(value)
+            return not np.isnan(value)
         if self.case_sensitive:
-            refval = self.ref
+            value = str(value)
+            refval = str(self.ref)
         else:
-            value = value.lower()
-            refval = self.ref.lower()
+            value = str(value).lower()
+            refval = str(self.ref).lower()
         if self.oper == self.Equal:
             return value == refval
         if self.oper == self.NotEqual:
@@ -460,7 +465,7 @@ class FilterString(ValueFilter):
         if self.oper == self.GreaterEqual:
             return value >= refval
         if self.oper == self.Contains:
-            return value in refval
+            return refval in value
         if self.oper == self.StartsWith:
             return value.startswith(refval)
         if self.oper == self.EndsWith:
@@ -534,4 +539,4 @@ class FilterRegex(ValueFilter):
         self._re = re.compile(pattern, flags)
 
     def __call__(self, inst):
-        return bool(self._re.search(inst))
+        return bool(self._re.search(inst or ''))

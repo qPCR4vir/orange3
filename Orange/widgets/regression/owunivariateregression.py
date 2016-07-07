@@ -1,32 +1,32 @@
-from PyQt4.QtGui import QLayout
-from PyQt4 import QtCore
-from PyQt4 import QtGui
-from PyQt4.QtGui import QColor, QPen
-from PyQt4.QtCore import QRectF
+from PyQt4.QtGui import QColor, QSizePolicy, QPalette, QPen, QFont
+from PyQt4.QtCore import Qt, QRectF
 
 import pyqtgraph as pg
 import numpy as np
 
 from Orange.data import Table, Domain
-from Orange.regression.linear import (RidgeRegressionLearner, LinearModel,
-                                      LinearRegressionLearner, PolynomialLearner)
+from Orange.data.variable import ContinuousVariable, StringVariable
+from Orange.regression.linear import (RidgeRegressionLearner, PolynomialLearner,
+                                      LinearRegressionLearner, LinearModel)
 from Orange.regression import Learner
 from Orange.preprocess.preprocess import Preprocess
-from Orange.widgets import widget, settings, gui
+from Orange.widgets import settings, gui
 from Orange.widgets.utils import itemmodels
+from Orange.widgets.utils.owlearnerwidget import OWBaseLearner
 from Orange.widgets.utils.sql import check_sql_input
+from Orange.canvas import report
 
 
-class OWUnivariateRegression(widget.OWWidget):
-    name = "Univariate Regression"
+class OWUnivariateRegression(OWBaseLearner):
+    name = "Univariate Polynomial Regression"
     description = "Univariate regression with polynomial expansion."
     icon = "icons/UnivariateRegression.svg"
 
-    inputs = [("Data", Table, "set_data", widget.Default),
-              ("Preprocessor", Preprocess, "set_preprocessor"),
-              ("Learner", Learner, "set_learner")]
-    outputs = [("Learner", Learner),
-               ("Predictor", LinearModel)]
+    inputs = [("Learner", Learner, "set_learner")]
+
+    outputs = [("Coefficients", Table)]
+
+    LEARNER = PolynomialLearner
 
     learner_name = settings.Setting("Univariate Regression")
 
@@ -37,31 +37,26 @@ class OWUnivariateRegression(widget.OWWidget):
 
     want_main_area = True
 
-    def __init__(self):
-        super().__init__()
+    def add_main_layout(self):
 
         self.data = None
         self.preprocessors = None
         self.learner = None
+
         self.scatterplot_item = None
         self.plot_item = None
 
         self.x_label = 'x'
         self.y_label = 'y'
 
-        box = gui.widgetBox(self.controlArea, "Learner/Predictor Name")
-        gui.lineEdit(box, self, "learner_name")
-
-        box = gui.widgetBox(self.controlArea, "Variables")
+        box = gui.vBox(self.controlArea, "Variables")
 
         self.x_var_model = itemmodels.VariableListModel()
         self.comboBoxAttributesX = gui.comboBox(
-            box, self, value='x_var_index',
-            label="Input ", orientation="horizontal",
-            callback=self.apply,
-            contentsLength=12)
+            box, self, value='x_var_index', label="Input: ",
+            orientation=Qt.Horizontal, callback=self.apply, contentsLength=12)
         self.comboBoxAttributesX.setSizePolicy(
-            QtGui.QSizePolicy.MinimumExpanding, QtGui.QSizePolicy.Fixed)
+            QSizePolicy.MinimumExpanding, QSizePolicy.Fixed)
         self.comboBoxAttributesX.setModel(self.x_var_model)
         gui.doubleSpin(
             gui.indentedBox(box),
@@ -71,12 +66,10 @@ class OWUnivariateRegression(widget.OWWidget):
         gui.separator(box, height=8)
         self.y_var_model = itemmodels.VariableListModel()
         self.comboBoxAttributesY = gui.comboBox(
-            box, self, value='y_var_index',
-            label='Target', orientation="horizontal",
-            callback=self.apply,
-            contentsLength=12)
+            box, self, value="y_var_index", label="Target: ",
+            orientation=Qt.Horizontal, callback=self.apply, contentsLength=12)
         self.comboBoxAttributesY.setSizePolicy(
-            QtGui.QSizePolicy.MinimumExpanding, QtGui.QSizePolicy.Fixed)
+            QSizePolicy.MinimumExpanding, QSizePolicy.Fixed)
         self.comboBoxAttributesY.setModel(self.y_var_model)
 
         gui.rubber(self.controlArea)
@@ -85,10 +78,10 @@ class OWUnivariateRegression(widget.OWWidget):
         self.plotview = pg.PlotWidget(background="w")
         self.plot = self.plotview.getPlotItem()
 
-        axis_color = self.palette().color(QtGui.QPalette.Text)
-        axis_pen = QtGui.QPen(axis_color)
+        axis_color = self.palette().color(QPalette.Text)
+        axis_pen = QPen(axis_color)
 
-        tickfont = QtGui.QFont(self.font())
+        tickfont = QFont(self.font())
         tickfont.setPixelSize(max(int(tickfont.pixelSize() * 2 // 3), 11))
 
         axis = self.plot.getAxis("bottom")
@@ -106,7 +99,17 @@ class OWUnivariateRegression(widget.OWWidget):
 
         self.mainArea.layout().addWidget(self.plotview)
 
-        self.apply()
+    def send_report(self):
+        if self.data is None:
+            return
+        caption = report.render_items_vert((
+             ("Polynomial Expansion: ", self.polynomialexpansion),
+        ))
+        self.report_plot(self.plot)
+        if caption:
+            self.report_caption(caption)
+
+
 
     def clear(self):
         self.data = None
@@ -143,12 +146,6 @@ class OWUnivariateRegression(widget.OWWidget):
                 self.y_var_index = min(max(0, nvars-nclass), nvars - 1)
             else:
                 self.y_var_index = min(max(0, nvars-1), nvars - 1)
-
-    def set_preprocessor(self, preproc):
-        if preproc is None:
-            self.preprocessors = None
-        else:
-            self.preprocessors = (preproc,)
 
     def set_learner(self, learner):
         self.learner = learner
@@ -192,21 +189,28 @@ class OWUnivariateRegression(widget.OWWidget):
         predictor = None
 
         if self.data is not None:
-            if self.learner is None:
-                learner = LinearRegressionLearner(preprocessors=self.preprocessors)
+
+            degree = int(self.polynomialexpansion)
+            learner = self.LEARNER(preprocessors=self.preprocessors,
+                                   degree=degree,
+                                   learner=LinearRegressionLearner() if self.learner is None
+                                    else learner)
 
             attributes = self.x_var_model[self.x_var_index]
             class_var = self.y_var_model[self.y_var_index]
             data_table = Table(Domain([attributes], class_vars=[class_var]), self.data)
 
-            degree = int(self.polynomialexpansion)
-
-            learner = PolynomialLearner(learner, degree=degree)
             learner.name = self.learner_name
             predictor = learner(data_table)
 
-            x = data_table.X.ravel()
-            y = data_table.Y.ravel()
+            preprocessed_data = data_table
+            if self.preprocessors is not None:
+                for preprocessor in self.preprocessors:
+                    preprocessed_data = preprocessor(preprocessed_data)
+
+            x = preprocessed_data.X.ravel()
+            y = preprocessed_data.Y.ravel()
+
             linspace = np.linspace(min(x), max(x), 1000).reshape(-1,1)
             values = predictor(linspace, predictor.Value)
 
@@ -226,6 +230,26 @@ class OWUnivariateRegression(widget.OWWidget):
 
         self.send("Learner", learner)
         self.send("Predictor", predictor)
+
+        # Send model coefficents
+        model = None
+        if predictor is not None:
+            model = predictor.model
+            if hasattr(model, "model"):
+                model = model.model
+            elif hasattr(model, "skl_model"):
+                model = model.skl_model
+        if model is not None and hasattr(model, "coef_"):
+            domain = Domain([ContinuousVariable("coef", number_of_decimals=7)],
+                            metas=[StringVariable("name")])
+            coefs = [model.intercept_ + model.coef_[0]] + list(model.coef_[1:])
+            names = ["1", x_label] + \
+                    ["{}^{}".format(x_label, i) for i in range(2, degree + 1)]
+            coef_table = Table(domain, list(zip(coefs, names)))
+            self.send("Coefficients", coef_table)
+        else:
+            self.send("Coefficients", None)
+
 
 
 if __name__ == "__main__":

@@ -17,6 +17,7 @@ from PyQt4.QtCore import Qt
 
 import Orange.data
 from Orange.widgets import widget, gui, settings
+from Orange.widgets.settings import Setting
 from Orange.widgets.utils.sql import check_sql_input
 
 
@@ -50,13 +51,20 @@ class OWConcatenate(widget.OWWidget):
     want_main_area = False
     resizing_enabled = False
 
+    domain_opts = ("Union of attributes appearing in all tables",
+                   "Intersection of attributes in all tables")
+
+    id_roles = ("Class attribute", "Attribute", "Meta attribute")
+
+    auto_commit = Setting(True)
+
     def __init__(self):
         super().__init__()
 
         self.primary_data = None
         self.more_data = OrderedDict()
 
-        mergebox = gui.widgetBox(self.controlArea, "Domains merging")
+        mergebox = gui.vBox(self.controlArea, "Domain Merging")
         box = gui.radioButtons(
             mergebox, self, "merge_type",
             callback=self._merge_type_changed)
@@ -65,23 +73,20 @@ class OWConcatenate(widget.OWWidget):
             box, self.tr("When there is no primary table, " +
                          "the domain should be:"))
 
-        gui.appendRadioButton(
-            box, self.tr("Union of attributes appearing in all tables"))
-
-        gui.appendRadioButton(
-            box, self.tr("Intersection of attributes in all tables"))
+        for opts in self.domain_opts:
+            gui.appendRadioButton(box, self.tr(opts))
 
         gui.separator(box)
 
         label = gui.widgetLabel(
             box,
-            self.tr("The resulting table will have class only if there " +
+            self.tr("The resulting table will have a class only if there " +
                     "is no conflict between input classes."))
         label.setWordWrap(True)
 
         ###
-        box = gui.widgetBox(
-            self.controlArea, self.tr("Source identification"),
+        box = gui.vBox(
+            self.controlArea, self.tr("Source Identification"),
             addSpace=False)
 
         cb = gui.checkBox(
@@ -98,16 +103,12 @@ class OWConcatenate(widget.OWWidget):
         )
 
         form.addRow(
-            self.tr("Feature name"),
+            self.tr("Feature name:"),
             gui.lineEdit(ibox, self, "source_attr_name", valueType=str))
 
         form.addRow(
-            self.tr("Place"),
-            gui.comboBox(
-                ibox, self, "source_column_role",
-                items=[self.tr("Class attribute"),
-                       self.tr("Attribute"),
-                       self.tr("Meta attribute")])
+            self.tr("Place:"),
+            gui.comboBox(ibox, self, "source_column_role", items=self.id_roles)
         )
 
         ibox.layout().addLayout(form)
@@ -117,10 +118,10 @@ class OWConcatenate(widget.OWWidget):
         cb.disables.append(ibox)
         cb.makeConsistent()
 
-        gui.button(
-            self.controlArea, self, self.tr("Apply Changes"),
-            callback=self.apply, default=True
-        )
+        box = gui.auto_commit(
+            self.controlArea, self, "auto_commit", "Apply", commit=self.apply)
+        box.layout().insertWidget(0, self.report_button)
+        box.layout().insertSpacing(1, 20)
 
     @check_sql_input
     def set_primary_data(self, data):
@@ -178,6 +179,18 @@ class OWConcatenate(widget.OWWidget):
     def _merge_type_changed(self, ):
         if self.primary_data is None and self.more_data:
             self.apply()
+
+    def send_report(self):
+        items = OrderedDict()
+        if self.primary_data is not None:
+            items["Domain"] = "from primary data"
+        else:
+            items["Domain"] = self.tr(self.domain_opts[self.merge_type]).lower()
+        if self.append_source_column:
+            items["Source data ID"] = "{} (as {})".format(
+                self.source_attr_name,
+                self.id_roles[self.source_column_role].lower())
+        self.report_items(items)
 
 
 def concat(tables):
